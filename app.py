@@ -23,7 +23,9 @@ import random
 import re
 import secrets
 import ssl
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +51,9 @@ LOGIN_WINDOW = 10 * 60
 LOGIN_LIMIT = 8
 AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
+SEARCH_JOBS: dict[str, dict[str, Any]] = {}
+SEARCH_JOBS_LOCK = threading.Lock()
+SEARCH_JOB_TTL = 60 * 60
 
 
 SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
@@ -166,6 +171,12 @@ class Lead:
     search_url: str = ""
     raw_type: str = ""
     qcc_url: str = ""
+    alias: str = ""
+    email: str = ""
+    company_website: str = ""
+    poi_id: str = ""
+    location: str = ""
+    updated_at: str = ""
 
 
 def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -268,6 +279,12 @@ def as_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def first_text(value: Any) -> str:
+    if isinstance(value, list):
+        return str(next((item for item in value if item), "")).strip()
+    return str(value or "").strip()
+
+
 def fallback_leads(regions: list[str], sectors: dict[str, dict[str, Any]], custom_keywords: list[str]) -> list[Lead]:
     leads: list[Lead] = []
     for region in regions:
@@ -303,6 +320,7 @@ def collect_amap_leads(
     custom_keywords: list[str],
     pages: int,
     keyword_limit: int,
+    progress_callback: Any = None,
 ) -> tuple[list[Lead], list[str]]:
     leads: list[Lead] = []
     errors: list[str] = []
@@ -326,17 +344,39 @@ def collect_amap_leads(
             executor.submit(amap_search, amap_key, region, keyword, page): (region, sector, keyword, page)
             for region, sector, keyword, page in jobs
         }
+        completed = 0
+        total = len(jobs)
+        if progress_callback:
+            progress_callback(completed, total, len(leads), 0, "正在连接高德数据服务")
         for future in as_completed(future_jobs):
             region, sector, keyword, page = future_jobs[future]
             try:
                 data = future.result()
             except Exception as exc:  # noqa: BLE001 - show concise collection errors to user.
                 errors.append(f"{region}/{keyword}/第{page}页：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(leads),
+                        len([lead for lead in leads if lead.phone]),
+                        f"{region} · {keyword} · 第{page}页",
+                    )
                 continue
 
             if data.get("status") != "1":
                 info = data.get("info") or "高德接口返回失败"
                 errors.append(f"{region}/{keyword}：{info}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(leads),
+                        len([lead for lead in leads if lead.phone]),
+                        f"{region} · {keyword} · 第{page}页",
+                    )
                 continue
 
             for poi in data.get("pois") or []:
@@ -350,6 +390,12 @@ def collect_amap_leads(
                 address = as_text(poi.get("address"))
                 phone = as_text(poi.get("tel")).replace(";", " / ")
                 raw_type = as_text(poi.get("type"))
+                alias = as_text(poi.get("alias"))
+                email = as_text(poi.get("email"))
+                company_website = first_text(poi.get("website"))
+                poi_id = as_text(poi.get("id"))
+                location = as_text(poi.get("location"))
+                updated_at = as_text(poi.get("timestamp"))
                 dedupe_key = f"{name}|{address}"
                 if dedupe_key in seen:
                     continue
@@ -372,7 +418,22 @@ def collect_amap_leads(
                         search_url=links["amap"],
                         raw_type=raw_type,
                         qcc_url=links["qcc"],
+                        alias=alias,
+                        email=email,
+                        company_website=company_website,
+                        poi_id=poi_id,
+                        location=location,
+                        updated_at=updated_at,
                     )
+                )
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    total,
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    f"{region} · {keyword} · 第{page}页",
                 )
     return leads, errors
 
@@ -399,7 +460,7 @@ def procurement_links(regions: list[str]) -> list[Lead]:
     return leads
 
 
-def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
+def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
     regions = normalize_regions(payload.get("regions"))
     sectors = selected_sectors(payload.get("sectors"))
     custom_keywords = [
@@ -425,6 +486,7 @@ def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
             custom_keywords,
             pages,
             keyword_limit,
+            progress_callback,
         )
         if not leads:
             leads = fallback_leads(regions, sectors, custom_keywords)
@@ -456,6 +518,84 @@ def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def update_search_job(
+    job_id: str,
+    completed: int,
+    total: int,
+    company_count: int,
+    phone_count: int,
+    current: str,
+) -> None:
+    percent = round((completed / total) * 100) if total else 0
+    with SEARCH_JOBS_LOCK:
+        job = SEARCH_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(
+            {
+                "completed": completed,
+                "total": total,
+                "percent": min(percent, 99),
+                "companyCount": company_count,
+                "phoneCount": phone_count,
+                "current": current,
+            }
+        )
+
+
+def run_search_job(job_id: str, payload: dict[str, Any]) -> None:
+    try:
+        result = collect_leads(
+            payload,
+            lambda completed, total, companies, phones, current: update_search_job(
+                job_id,
+                completed,
+                total,
+                companies,
+                phones,
+                current,
+            ),
+        )
+        with SEARCH_JOBS_LOCK:
+            job = SEARCH_JOBS.get(job_id)
+            if job:
+                job.update(
+                    {
+                        "status": "completed",
+                        "completed": result["meta"].get("requestCount", 0),
+                        "total": result["meta"].get("requestCount", 0),
+                        "percent": 100,
+                        "companyCount": result["meta"].get("companyCount", 0),
+                        "phoneCount": result["meta"].get("phoneCount", 0),
+                        "current": "采集完成",
+                        "result": result,
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001 - return concise job failure to the UI.
+        with SEARCH_JOBS_LOCK:
+            job = SEARCH_JOBS.get(job_id)
+            if job:
+                job.update(
+                    {
+                        "status": "failed",
+                        "current": "采集失败",
+                        "error": str(exc),
+                    }
+                )
+
+
+def cleanup_search_jobs() -> None:
+    cutoff = time.time() - SEARCH_JOB_TTL
+    with SEARCH_JOBS_LOCK:
+        expired = [
+            job_id
+            for job_id, job in SEARCH_JOBS.items()
+            if job.get("createdAt", 0) < cutoff
+        ]
+        for job_id in expired:
+            SEARCH_JOBS.pop(job_id, None)
+
+
 def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
     output = io.StringIO()
     fieldnames = [
@@ -474,6 +614,12 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
         "search_url",
         "website",
         "qcc_url",
+        "alias",
+        "email",
+        "company_website",
+        "poi_id",
+        "location",
+        "updated_at",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
@@ -548,7 +694,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok", "version": "parallel-search-v1"})
+            json_response(self, {"status": "ok", "version": "progress-company-profile-v1"})
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
@@ -573,6 +719,19 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
                 },
             )
+            return
+        if path == "/api/search/status":
+            query = urlparse(self.path).query
+            params = dict(item.split("=", 1) for item in query.split("&") if "=" in item)
+            job_id = params.get("id", "")
+            with SEARCH_JOBS_LOCK:
+                job = SEARCH_JOBS.get(job_id)
+                payload = dict(job) if job else None
+            if not payload:
+                json_response(self, {"error": "采集任务不存在或已过期"}, 404)
+                return
+            payload.pop("createdAt", None)
+            json_response(self, payload)
             return
         return super().do_GET()
 
@@ -624,6 +783,30 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if not self.authenticated():
             json_response(self, {"error": "请先登录"}, 401)
+            return
+
+        if path == "/api/search/start":
+            cleanup_search_jobs()
+            job_id = uuid.uuid4().hex
+            with SEARCH_JOBS_LOCK:
+                SEARCH_JOBS[job_id] = {
+                    "status": "running",
+                    "completed": 0,
+                    "total": 0,
+                    "percent": 0,
+                    "companyCount": 0,
+                    "phoneCount": 0,
+                    "current": "正在准备采集任务",
+                    "result": None,
+                    "error": "",
+                    "createdAt": time.time(),
+                }
+            threading.Thread(
+                target=run_search_job,
+                args=(job_id, payload),
+                daemon=True,
+            ).start()
+            json_response(self, {"jobId": job_id}, 202)
             return
 
         if path == "/api/search":

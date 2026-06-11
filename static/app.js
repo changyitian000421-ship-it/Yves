@@ -2,6 +2,8 @@ const state = {
   sectors: {},
   leads: [],
   filtered: [],
+  meta: {},
+  activeJobId: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -93,7 +95,7 @@ function renderLeads() {
   }
 
   tbody.innerHTML = state.filtered
-    .map((lead) => {
+    .map((lead, index) => {
       const phone = lead.phone || "待补充";
       const address = lead.address ? `<div class="subline">${escapeHtml(lead.address)}</div>` : "";
       const type = lead.raw_type ? `<div class="subline">${escapeHtml(lead.raw_type)}</div>` : "";
@@ -105,6 +107,9 @@ function renderLeads() {
         : "";
       const qcc = lead.qcc_url
         ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">企查查</a>`
+        : "";
+      const detail = lead.source === "高德 POI"
+        ? `<button class="detail-button" type="button" data-detail-index="${index}">详情</button>`
         : "";
       return `
         <tr>
@@ -122,7 +127,7 @@ function renderLeads() {
             <div class="subline">${escapeHtml(lead.use_case)}</div>
           </td>
           <td>${escapeHtml(lead.pitch)}</td>
-          <td><div class="link-group">${searchUrl}${website}${qcc}</div></td>
+          <td><div class="link-group">${detail}${searchUrl}${website}${qcc}</div></td>
         </tr>
       `;
     })
@@ -163,12 +168,11 @@ function buildPayload() {
 
 async function runSearch(mode = "amap") {
   const button = $(".primary");
+  const payload = buildPayload();
   button.disabled = true;
   button.textContent = "正在采集...";
-    const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
-    setNotice(mode === "amap" ? `正在采集具体公司（${scope}）。` : "正在生成开发任务。");
-
-  const payload = buildPayload();
+  const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
+  setNotice(mode === "amap" ? `正在采集具体公司（${scope}）。` : "正在生成开发任务。");
   if (mode === "task") {
     payload.amapKey = "";
     payload.requireAmap = false;
@@ -177,7 +181,8 @@ async function runSearch(mode = "amap") {
   }
 
   try {
-    const response = await fetch("/api/search", {
+    showProgress(mode === "amap" ? "正在采集企业" : "正在生成开发任务");
+    const response = await fetch("/api/search/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -186,27 +191,111 @@ async function runSearch(mode = "amap") {
       window.location.href = "/login";
       return;
     }
-    if (!response.ok) throw new Error("采集请求失败");
-    const data = await response.json();
-    state.leads = data.leads || [];
-    state.meta = data.meta || {};
-    renderLeads();
-    $("#export-button").disabled = !state.leads.length;
-    const warnings = data.errors?.length ? ` ${data.errors[0]}` : "";
-    const realCount = data.meta?.companyCount || 0;
-    const phoneCount = data.meta?.phoneCount || 0;
-    const summary = data.meta?.mode === "amap"
-      ? `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
-      : data.meta?.mode === "need_key"
-        ? "未开始采集。"
-        : `已生成 ${state.leads.length} 条开发任务。`;
-    setNotice(`${summary}${warnings}`, Boolean(data.errors?.length));
+    if (!response.ok) throw new Error("无法启动采集任务");
+    const started = await response.json();
+    state.activeJobId = started.jobId;
+    const data = await pollSearchJob(started.jobId);
+    applySearchResult(data);
   } catch (error) {
     setNotice(error.message || "采集失败", true);
+    $("#progress-title").textContent = "采集失败";
   } finally {
     button.disabled = false;
     button.textContent = "采集具体公司和电话";
+    state.activeJobId = "";
   }
+}
+
+function showProgress(title) {
+  $("#progress-panel").hidden = false;
+  $("#progress-title").textContent = title;
+  updateProgress({
+    completed: 0,
+    total: 0,
+    percent: 0,
+    companyCount: 0,
+    phoneCount: 0,
+    current: "正在准备采集任务",
+  });
+}
+
+function updateProgress(job) {
+  $("#progress-percent").textContent = `${job.percent || 0}%`;
+  $("#progress-bar").style.width = `${job.percent || 0}%`;
+  $("#progress-current").textContent = job.current || "正在采集";
+  $("#progress-requests").textContent = `${job.completed || 0} / ${job.total || 0}`;
+  $("#progress-companies").textContent = job.companyCount || 0;
+  $("#progress-phones").textContent = job.phoneCount || 0;
+}
+
+async function pollSearchJob(jobId) {
+  while (state.activeJobId === jobId) {
+    const response = await fetch(`/api/search/status?id=${encodeURIComponent(jobId)}`);
+    if (response.status === 401) {
+      window.location.href = "/login";
+      throw new Error("登录已过期");
+    }
+    const job = await response.json();
+    if (!response.ok) throw new Error(job.error || "读取采集进度失败");
+    updateProgress(job);
+    if (job.status === "completed") {
+      $("#progress-title").textContent = "采集完成";
+      return job.result;
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || "采集失败");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error("采集任务已停止");
+}
+
+function applySearchResult(data) {
+  state.leads = data.leads || [];
+  state.meta = data.meta || {};
+  renderLeads();
+  $("#export-button").disabled = !state.leads.length;
+  const warnings = data.errors?.length ? ` ${data.errors[0]}` : "";
+  const realCount = data.meta?.companyCount || 0;
+  const phoneCount = data.meta?.phoneCount || 0;
+  const summary = data.meta?.mode === "amap"
+    ? `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
+    : data.meta?.mode === "need_key"
+      ? "未开始采集。"
+      : `已生成 ${state.leads.length} 条开发任务。`;
+  setNotice(`${summary}${warnings}`, Boolean(data.errors?.length));
+}
+
+function detailItem(label, value, isLink = false) {
+  if (!value) return "";
+  const content = isLink
+    ? `<a href="${escapeHtml(value)}" target="_blank" rel="noreferrer">${escapeHtml(value)}</a>`
+    : escapeHtml(value);
+  return `<div><dt>${escapeHtml(label)}</dt><dd>${content}</dd></div>`;
+}
+
+function showCompanyDetail(lead) {
+  $("#detail-company").textContent = lead.company || "企业详情";
+  $("#detail-grid").innerHTML = [
+    detailItem("企业别名", lead.alias),
+    detailItem("联系电话", lead.phone),
+    detailItem("公开邮箱", lead.email),
+    detailItem("企业官网", lead.company_website, true),
+    detailItem("所属地区", lead.region),
+    detailItem("详细地址", lead.address),
+    detailItem("高德行业类型", lead.raw_type),
+    detailItem("潜在用途", lead.use_case),
+    detailItem("地图坐标", lead.location),
+    detailItem("高德 POI ID", lead.poi_id),
+    detailItem("数据更新时间", lead.updated_at),
+    detailItem("数据来源", lead.source),
+  ].join("") || "<p>暂无更多公开信息。</p>";
+  $("#detail-actions").innerHTML = [
+    lead.search_url ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">高德地图</a>` : "",
+    lead.qcc_url ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">工商信息核验</a>` : "",
+    lead.website ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">网页搜索</a>` : "",
+  ].join("");
+  $("#company-dialog").showModal();
 }
 
 async function exportCsv() {
@@ -250,6 +339,15 @@ function bindEvents() {
   $("#logout-button").addEventListener("click", logout);
   $("#filter").addEventListener("input", renderLeads);
   $("#only-phone").addEventListener("change", renderLeads);
+  $("#lead-body").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-detail-index]");
+    if (!button) return;
+    showCompanyDetail(state.filtered[Number(button.dataset.detailIndex)]);
+  });
+  $("#detail-close").addEventListener("click", () => $("#company-dialog").close());
+  $("#company-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#company-dialog")) $("#company-dialog").close();
+  });
 
   $("#quick-filters").addEventListener("click", (event) => {
     const button = event.target.closest("button");

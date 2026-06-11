@@ -122,6 +122,24 @@
           当前无采集任务。
         </section>
 
+        <section id="progress-panel" class="progress-panel" hidden aria-live="polite">
+          <div class="progress-head">
+            <div>
+              <strong id="progress-title">正在采集企业</strong>
+              <p id="progress-current">正在准备采集任务</p>
+            </div>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="progress-track">
+            <div id="progress-bar" class="progress-bar"></div>
+          </div>
+          <div class="progress-stats">
+            <span><strong id="progress-requests">0 / 0</strong> 请求</span>
+            <span><strong id="progress-companies">0</strong> 企业</span>
+            <span><strong id="progress-phones">0</strong> 有电话</span>
+          </div>
+        </section>
+
         <section class="table-shell">
           <table>
             <thead>
@@ -145,6 +163,18 @@
         </section>
       </main>
     </div>
+
+    <dialog id="company-dialog" class="company-dialog">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">Company profile</div>
+          <h3 id="detail-company">企业详情</h3>
+        </div>
+        <button id="detail-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <div id="detail-grid" class="detail-grid"></div>
+      <div id="detail-actions" class="dialog-actions"></div>
+    </dialog>
 
     <script src="/app.js"></script>
   </body>
