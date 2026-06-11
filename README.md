@@ -2,6 +2,8 @@
 
 这是一个面向中国市场的本地小工具，用来批量生成和筛选氯化钙潜在买家线索。
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/changyitian000421-ship-it/Yves)
+
 ## 能做什么
 
 - 按地区和下游行业批量生成买家开发清单
