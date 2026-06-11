@@ -548,7 +548,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok"})
+            json_response(self, {"status": "ok", "version": "parallel-search-v1"})
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
