@@ -19,10 +19,12 @@ import hmac
 import io
 import json
 import os
+import random
 import re
 import secrets
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
@@ -45,6 +47,8 @@ SESSION_MAX_AGE = 12 * 60 * 60
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_WINDOW = 10 * 60
 LOGIN_LIMIT = 8
+AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
+AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
 
 
 SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
@@ -234,8 +238,17 @@ def amap_search(
     )
     url = f"https://restapi.amap.com/v3/place/text?{query}"
     req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
-    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    for attempt in range(5):
+        with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        rate_limited = (
+            data.get("infocode") in AMAP_RETRY_CODES
+            or "QPS" in str(data.get("info") or "")
+        )
+        if not rate_limited:
+            return data
+        time.sleep((0.65 * (2**attempt)) + random.uniform(0.1, 0.55))
+    return data
 
 
 def build_search_links(company_type: str, region: str, keyword: str) -> dict[str, str]:
@@ -289,72 +302,78 @@ def collect_amap_leads(
     sectors: dict[str, dict[str, Any]],
     custom_keywords: list[str],
     pages: int,
+    keyword_limit: int,
 ) -> tuple[list[Lead], list[str]]:
     leads: list[Lead] = []
     errors: list[str] = []
     seen: set[str] = set()
     pages = max(1, min(pages, 10))
-
+    jobs: list[tuple[str, dict[str, Any], str, int]] = []
     for region in regions:
         for sector in sectors.values():
             keywords = list(sector["keywords"])
             for custom in custom_keywords:
                 custom = custom.strip()
                 if custom and custom not in keywords:
-                    keywords.append(custom)
+                    keywords.insert(0, custom)
+            keywords = list(dict.fromkeys(keywords))[:keyword_limit]
             for keyword in keywords:
                 for page in range(1, pages + 1):
-                    try:
-                        data = amap_search(amap_key, region, keyword, page)
-                    except Exception as exc:  # noqa: BLE001 - show concise collection errors to user.
-                        errors.append(f"{region}/{keyword}/第{page}页：{exc}")
-                        break
+                    jobs.append((region, sector, keyword, page))
 
-                    if data.get("status") != "1":
-                        info = data.get("info") or "高德接口返回失败"
-                        errors.append(f"{region}/{keyword}：{info}")
-                        break
+    with ThreadPoolExecutor(max_workers=AMAP_WORKERS) as executor:
+        future_jobs = {
+            executor.submit(amap_search, amap_key, region, keyword, page): (region, sector, keyword, page)
+            for region, sector, keyword, page in jobs
+        }
+        for future in as_completed(future_jobs):
+            region, sector, keyword, page = future_jobs[future]
+            try:
+                data = future.result()
+            except Exception as exc:  # noqa: BLE001 - show concise collection errors to user.
+                errors.append(f"{region}/{keyword}/第{page}页：{exc}")
+                continue
 
-                    pois = data.get("pois") or []
-                    if not pois:
-                        break
+            if data.get("status") != "1":
+                info = data.get("info") or "高德接口返回失败"
+                errors.append(f"{region}/{keyword}：{info}")
+                continue
 
-                    for poi in pois:
-                        name = str(poi.get("name") or "").strip()
-                        if not name:
-                            continue
-                        province = as_text(poi.get("pname"))
-                        city_name = as_text(poi.get("cityname"))
-                        district = as_text(poi.get("adname"))
-                        region_label = " ".join(part for part in [province, city_name, district] if part) or region
-                        address = as_text(poi.get("address"))
-                        phone = as_text(poi.get("tel")).replace(";", " / ")
-                        raw_type = as_text(poi.get("type"))
-                        dedupe_key = f"{name}|{address}"
-                        if dedupe_key in seen:
-                            continue
-                        seen.add(dedupe_key)
-                        score, reason = lead_score(name, raw_type, int(sector["score"]), bool(phone))
-                        links = build_search_links(name, region, keyword)
-                        leads.append(
-                            Lead(
-                                company=name,
-                                region=region_label,
-                                sector=sector["name"],
-                                source="高德 POI",
-                                score=score,
-                                phone=phone,
-                                address=address,
-                                website=links["baidu"],
-                                use_case=sector["uses"],
-                                pitch=sector["pitch"],
-                                match_reason=f"{keyword}；{reason}",
-                                search_url=links["amap"],
-                                raw_type=raw_type,
-                                qcc_url=links["qcc"],
-                            )
-                        )
-                    time.sleep(0.08)
+            for poi in data.get("pois") or []:
+                name = str(poi.get("name") or "").strip()
+                if not name:
+                    continue
+                province = as_text(poi.get("pname"))
+                city_name = as_text(poi.get("cityname"))
+                district = as_text(poi.get("adname"))
+                region_label = " ".join(part for part in [province, city_name, district] if part) or region
+                address = as_text(poi.get("address"))
+                phone = as_text(poi.get("tel")).replace(";", " / ")
+                raw_type = as_text(poi.get("type"))
+                dedupe_key = f"{name}|{address}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                score, reason = lead_score(name, raw_type, int(sector["score"]), bool(phone))
+                links = build_search_links(name, region, keyword)
+                leads.append(
+                    Lead(
+                        company=name,
+                        region=region_label,
+                        sector=sector["name"],
+                        source="高德 POI",
+                        score=score,
+                        phone=phone,
+                        address=address,
+                        website=links["baidu"],
+                        use_case=sector["uses"],
+                        pitch=sector["pitch"],
+                        match_reason=f"{keyword}；{reason}",
+                        search_url=links["amap"],
+                        raw_type=raw_type,
+                        qcc_url=links["qcc"],
+                    )
+                )
     return leads, errors
 
 
@@ -389,6 +408,8 @@ def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
         if item.strip()
     ]
     pages = int(payload.get("pages") or 1)
+    fast_mode = bool(payload.get("fastMode", True))
+    keyword_limit = 2 if fast_mode else 8
     amap_key = str(os.getenv("AMAP_KEY") or payload.get("amapKey") or "").strip()
     require_amap = bool(payload.get("requireAmap"))
 
@@ -397,7 +418,14 @@ def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
         leads = []
         errors.append("要显示具体公司和电话，必须填写高德 Web 服务 API Key；否则只能生成开发任务清单。")
     elif amap_key:
-        leads, errors = collect_amap_leads(amap_key, regions, sectors, custom_keywords, pages)
+        leads, errors = collect_amap_leads(
+            amap_key,
+            regions,
+            sectors,
+            custom_keywords,
+            pages,
+            keyword_limit,
+        )
         if not leads:
             leads = fallback_leads(regions, sectors, custom_keywords)
             errors.append("未采集到高德结果，已生成搜索任务清单。")
@@ -415,6 +443,12 @@ def collect_leads(payload: dict[str, Any]) -> dict[str, Any]:
             "count": len(leads),
             "companyCount": len([lead for lead in leads if lead.source == "高德 POI"]),
             "phoneCount": len([lead for lead in leads if lead.phone]),
+            "requestCount": len(regions) * sum(
+                min(keyword_limit, len(item["keywords"]) + len(custom_keywords))
+                for item in sectors.values()
+            ) * max(1, min(pages, 10)),
+            "workers": AMAP_WORKERS,
+            "fastMode": fast_mode,
             "regions": regions,
             "sectors": [item["name"] for item in sectors.values()],
             "mode": "amap" if amap_key else "need_key" if require_amap else "task",

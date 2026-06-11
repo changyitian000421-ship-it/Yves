@@ -11,3 +11,5 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: AMAP_WORKERS
+        value: "4"

@@ -157,6 +157,7 @@ function buildPayload() {
     customKeywords: $("#custom-keywords").value.trim(),
     pages: Number($("#pages").value || 1),
     includeProcurement: $("#include-procurement").checked,
+    fastMode: $("#fast-mode").checked,
   };
 }
 
@@ -164,7 +165,8 @@ async function runSearch(mode = "amap") {
   const button = $(".primary");
   button.disabled = true;
   button.textContent = "正在采集...";
-  setNotice(mode === "amap" ? "正在采集具体公司。" : "正在生成开发任务。");
+    const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
+    setNotice(mode === "amap" ? `正在采集具体公司（${scope}）。` : "正在生成开发任务。");
 
   const payload = buildPayload();
   if (mode === "task") {
@@ -194,7 +196,7 @@ async function runSearch(mode = "amap") {
     const realCount = data.meta?.companyCount || 0;
     const phoneCount = data.meta?.phoneCount || 0;
     const summary = data.meta?.mode === "amap"
-      ? `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话。`
+      ? `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
       : data.meta?.mode === "need_key"
         ? "未开始采集。"
         : `已生成 ${state.leads.length} 条开发任务。`;
