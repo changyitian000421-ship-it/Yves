@@ -1,5 +1,7 @@
 const state = {
-  sectors: {},
+  downstreamSectors: {},
+  upstreamSectors: {},
+  direction: "downstream",
   leads: [],
   filtered: [],
   meta: {},
@@ -29,8 +31,15 @@ function setNotice(message, isError = false) {
 
 function renderSectors() {
   const container = $("#sector-list");
-  const defaults = new Set(["snow", "desiccant", "water", "concrete", "trader"]);
-  container.innerHTML = Object.entries(state.sectors)
+  const sectors = state.direction === "upstream"
+    ? state.upstreamSectors
+    : state.downstreamSectors;
+  const defaults = new Set(
+    state.direction === "upstream"
+      ? ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"]
+      : ["snow", "desiccant", "water", "concrete", "trader"],
+  );
+  container.innerHTML = Object.entries(sectors)
     .map(([id, item]) => {
       const checked = defaults.has(id) ? "checked" : "";
       return `
@@ -56,6 +65,8 @@ function leadMatches(lead, query) {
     lead.pitch,
     lead.match_reason,
     lead.raw_type,
+    lead.process_basis,
+    lead.confidence,
   ]
     .join(" ")
     .toLowerCase();
@@ -77,9 +88,11 @@ function renderMetrics(leads) {
     task: "开发任务",
     need_key: "缺少 Key",
   };
-  const mode = state.leads.length || state.meta?.mode
-    ? modeLabels[state.meta?.mode] || "待开始"
-    : "待开始";
+  const mode = state.meta?.direction === "upstream" && state.meta?.mode === "amap"
+    ? "上游副产"
+    : state.leads.length || state.meta?.mode
+      ? modeLabels[state.meta?.mode] || "待开始"
+      : "待开始";
   $("#metric-mode").textContent = mode;
 }
 
@@ -111,6 +124,9 @@ function renderLeads() {
       const detail = lead.source === "高德 POI"
         ? `<button class="detail-button" type="button" data-detail-index="${index}">详情</button>`
         : "";
+      const confidence = lead.confidence
+        ? `<span class="confidence confidence-${lead.confidence === "高" ? "high" : lead.confidence === "中" ? "medium" : "review"}">${escapeHtml(lead.confidence)}相关</span>`
+        : "";
       return `
         <tr>
           <td><span class="${scoreClass(Number(lead.score))}">${escapeHtml(lead.score)}</span></td>
@@ -124,6 +140,7 @@ function renderLeads() {
           <td>${escapeHtml(phone)}</td>
           <td>
             ${escapeHtml(lead.match_reason)}
+            ${confidence}
             <div class="subline">${escapeHtml(lead.use_case)}</div>
           </td>
           <td>${escapeHtml(lead.pitch)}</td>
@@ -142,7 +159,8 @@ async function fetchConfig() {
   }
   if (!response.ok) throw new Error("配置加载失败");
   const config = await response.json();
-  state.sectors = config.sectors;
+  state.downstreamSectors = config.downstreamSectors || config.sectors;
+  state.upstreamSectors = config.upstreamSectors || {};
   renderSectors();
   $("#api-status").textContent = config.hasEnvAmapKey
     ? "企业采集服务已启用"
@@ -154,16 +172,67 @@ function buildPayload() {
   const presets = selectedValues("regionPreset");
   const customRegions = $("#regions").value.trim();
   const regions = [...presets];
-  if (customRegions) regions.push(customRegions);
+  if (customRegions) {
+    regions.push(...customRegions.split(/[,，、;\s]+/).filter(Boolean));
+  }
 
   return {
     regions,
+    direction: state.direction,
     sectors: selectedValues("sector"),
     customKeywords: $("#custom-keywords").value.trim(),
     pages: Number($("#pages").value || 1),
     includeProcurement: $("#include-procurement").checked,
     fastMode: $("#fast-mode").checked,
+    excludeSuppliers: $("#exclude-suppliers").checked,
+    strictUpstream: $("#strict-upstream").checked,
   };
+}
+
+function setDirection(direction) {
+  state.direction = direction === "upstream" ? "upstream" : "downstream";
+  const upstream = state.direction === "upstream";
+  renderSectors();
+  $("#sector-title").textContent = upstream ? "可能副产液钙的行业" : "下游行业";
+  $("#direction-note").textContent = upstream
+    ? "查找生产过程中可能形成液体氯化钙的企业；结果属于工艺线索，需要进一步核实。"
+    : "查找可能采购氯化钙的下游企业。";
+  $("#custom-keywords").placeholder = upstream
+    ? "例如：副产盐酸, 石灰中和, 湿法冶炼, 飞灰水洗"
+    : "例如：融雪剂厂家, 集装箱干燥剂, 钻井液";
+  $("#exclude-suppliers-wrap").hidden = !upstream;
+  $("#strict-upstream-wrap").hidden = !upstream;
+  $("#include-procurement").closest(".toggle").hidden = upstream;
+  $("#only-phone").checked = !upstream;
+  $("#result-title").textContent = upstream ? "液体氯化钙副产企业线索" : "潜在买家列表";
+  $("#reason-heading").textContent = upstream ? "工艺匹配依据" : "匹配原因";
+  $("#pitch-heading").textContent = upstream ? "核实重点" : "跟进话术";
+  $("#collect-button-label").textContent = upstream
+    ? "采集液钙副产企业"
+    : "采集具体公司和电话";
+  $("#quick-filters").innerHTML = upstream
+    ? `
+      <button type="button" data-filter="">全部</button>
+      <button type="button" data-filter="高">高相关</button>
+      <button type="button" data-filter="稀土">稀土</button>
+      <button type="button" data-filter="环氧氯丙烷">环氧氯丙烷</button>
+      <button type="button" data-filter="飞灰">飞灰水洗</button>
+      <button type="button" data-filter="钨">钨业</button>
+    `
+    : `
+      <button type="button" data-filter="">全部</button>
+      <button type="button" data-filter="融雪">融雪</button>
+      <button type="button" data-filter="干燥剂">干燥剂</button>
+      <button type="button" data-filter="水处理">水处理</button>
+      <button type="button" data-filter="化工">化工贸易</button>
+    `;
+  state.leads = [];
+  state.filtered = [];
+  state.meta = {};
+  $("#filter").value = "";
+  $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="8">选择地区和行业后开始采集。</td></tr>`;
+  renderMetrics([]);
+  setNotice(upstream ? "当前为上游副产液钙企业采集模式。" : "当前为下游买家采集模式。");
 }
 
 async function runSearch(mode = "amap") {
@@ -181,7 +250,13 @@ async function runSearch(mode = "amap") {
   }
 
   try {
-    showProgress(mode === "amap" ? "正在采集企业" : "正在生成开发任务");
+    showProgress(
+      mode === "amap"
+        ? state.direction === "upstream"
+          ? "正在采集副产液钙企业"
+          : "正在采集买家企业"
+        : "正在生成开发任务",
+    );
     const response = await fetch("/api/search/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -201,7 +276,9 @@ async function runSearch(mode = "amap") {
     $("#progress-title").textContent = "采集失败";
   } finally {
     button.disabled = false;
-    button.textContent = "采集具体公司和电话";
+    button.innerHTML = `<span id="collect-button-label">${
+      state.direction === "upstream" ? "采集液钙副产企业" : "采集具体公司和电话"
+    }</span>`;
     state.activeJobId = "";
   }
 }
@@ -259,7 +336,9 @@ function applySearchResult(data) {
   const realCount = data.meta?.companyCount || 0;
   const phoneCount = data.meta?.phoneCount || 0;
   const summary = data.meta?.mode === "amap"
-    ? `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
+    ? data.meta?.direction === "upstream"
+      ? `已发现 ${realCount} 家可能副产液体氯化钙的企业，其中 ${phoneCount} 家有电话；请按相关度核实工艺。`
+      : `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
     : data.meta?.mode === "need_key"
       ? "未开始采集。"
       : `已生成 ${state.leads.length} 条开发任务。`;
@@ -284,7 +363,9 @@ function showCompanyDetail(lead) {
     detailItem("所属地区", lead.region),
     detailItem("详细地址", lead.address),
     detailItem("高德行业类型", lead.raw_type),
-    detailItem("潜在用途", lead.use_case),
+    detailItem(lead.direction === "upstream" ? "副产工艺依据" : "潜在用途", lead.process_basis || lead.use_case),
+    detailItem("线索置信度", lead.confidence ? `${lead.confidence}相关` : ""),
+    detailItem(lead.direction === "upstream" ? "建议核实内容" : "销售跟进重点", lead.pitch),
     detailItem("地图坐标", lead.location),
     detailItem("高德 POI ID", lead.poi_id),
     detailItem("数据更新时间", lead.updated_at),
@@ -339,6 +420,9 @@ function bindEvents() {
   $("#logout-button").addEventListener("click", logout);
   $("#filter").addEventListener("input", renderLeads);
   $("#only-phone").addEventListener("change", renderLeads);
+  $$('input[name="direction"]').forEach((input) => {
+    input.addEventListener("change", () => setDirection(input.value));
+  });
   $("#lead-body").addEventListener("click", (event) => {
     const button = event.target.closest("[data-detail-index]");
     if (!button) return;
@@ -362,6 +446,7 @@ function bindEvents() {
 async function init() {
   try {
     await fetchConfig();
+    setDirection("downstream");
     bindEvents();
   } catch (error) {
     setNotice(error.message || "初始化失败", true);

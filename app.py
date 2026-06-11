@@ -108,6 +108,150 @@ SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
     },
 }
 
+UPSTREAM_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
+    "rare_earth": {
+        "name": "稀土分离/冶炼",
+        "keywords": ["稀土分离", "稀土冶炼", "稀土氧化物", "稀土湿法冶金"],
+        "process": "盐酸体系浸出、萃取或中和过程中，含钙中和剂可能形成氯化钙母液。",
+        "pitch": "核实盐酸用量、石灰/石灰石中和工段、母液浓度、杂质和月产生量。",
+        "indicators": ["稀土", "分离", "冶炼", "氧化物", "湿法"],
+        "strict_indicators": ["稀土"],
+        "confidence": "高",
+        "score": 32,
+    },
+    "epichlorohydrin": {
+        "name": "环氧氯丙烷",
+        "keywords": ["环氧氯丙烷生产", "氯醇法环氧氯丙烷", "甘油法环氧氯丙烷", "氯碱环氧氯丙烷"],
+        "process": "氯醇化/皂化等工段使用石灰时，可形成含氯化钙的工艺废水或副产液。",
+        "pitch": "优先确认工艺路线、皂化剂、液钙浓度、COD和有机氯等杂质。",
+        "indicators": ["环氧氯丙烷", "氯醇", "氯碱"],
+        "strict_indicators": ["环氧氯丙烷", "氯醇法", "甘油法"],
+        "confidence": "高",
+        "score": 36,
+    },
+    "fly_ash": {
+        "name": "飞灰水洗/资源化",
+        "keywords": ["飞灰水洗", "焚烧飞灰资源化", "飞灰资源综合利用", "生活垃圾飞灰处理"],
+        "process": "飞灰水洗液及后续酸碱调节、除杂处理中，可能形成高盐含钙氯化物溶液。",
+        "pitch": "确认水洗盐水去向、钙氯浓度、重金属指标、蒸发结晶或外售处置方式。",
+        "indicators": ["飞灰", "水洗", "焚烧", "资源化"],
+        "strict_indicators": ["飞灰", "焚烧"],
+        "confidence": "高",
+        "score": 34,
+    },
+    "tungsten": {
+        "name": "钨湿法冶炼",
+        "keywords": ["钨冶炼", "仲钨酸铵", "钨湿法冶金", "钨资源综合利用"],
+        "process": "钨湿法冶炼的酸分解、中和或钙盐转化工段可能产生含氯化钙溶液。",
+        "pitch": "确认盐酸/氯化钙体系、石灰中和、钨钼磷砷等杂质及液体副产量。",
+        "indicators": ["钨", "仲钨酸铵", "湿法", "冶炼"],
+        "strict_indicators": ["钨", "仲钨酸铵"],
+        "confidence": "高",
+        "score": 32,
+    },
+    "soda_ash": {
+        "name": "氨碱法纯碱",
+        "keywords": ["氨碱法纯碱", "纯碱生产", "联碱纯碱", "制碱工业"],
+        "process": "氨碱法蒸氨母液典型含氯化钙，是大宗液体氯化钙潜在线索。",
+        "pitch": "先核实是否为氨碱法，再确认蒸氨废液浓度、氨氮、盐分和综合利用现状。",
+        "indicators": ["纯碱", "制碱", "氨碱"],
+        "strict_indicators": ["纯碱", "制碱", "氨碱"],
+        "confidence": "高",
+        "score": 38,
+    },
+    "pharma": {
+        "name": "医药/农药中间体",
+        "keywords": ["医药中间体生产", "原料药生产", "农药中间体", "精细化工中间体"],
+        "process": "含氯或盐酸工艺废酸经石灰中和时，可能形成含有机物的氯化钙溶液。",
+        "pitch": "核实具体产品和中和工艺，重点关注COD、色度、残留溶剂及危废属性。",
+        "indicators": ["医药", "原料药", "农药", "中间体", "制药"],
+        "strict_indicators": ["医药", "原料药", "农药", "制药"],
+        "confidence": "中",
+        "score": 24,
+    },
+    "new_energy": {
+        "name": "新能源材料/电池回收",
+        "keywords": ["锂电材料生产", "动力电池回收", "新能源材料湿法", "三元前驱体生产"],
+        "process": "湿法浸出、酸洗和石灰中和工段可能形成含钙氯盐溶液，需按具体路线核实。",
+        "pitch": "确认是否使用盐酸、石灰中和以及镍钴锰锂等金属杂质和废液处置方式。",
+        "indicators": ["锂电", "电池", "新能源材料", "三元", "湿法"],
+        "strict_indicators": ["锂电", "动力电池", "新能源材料", "三元"],
+        "confidence": "中",
+        "score": 23,
+    },
+    "fluorine": {
+        "name": "含氟新材料",
+        "keywords": ["含氟新材料生产", "氟化工", "氟盐生产", "含氟废水处理"],
+        "process": "含氟/含酸废水采用钙法处理时可能伴随高氯含钙母液，具体成分需核验。",
+        "pitch": "确认盐酸来源、钙法除氟、中和母液及氟离子和其他杂质指标。",
+        "indicators": ["氟", "氟化工", "氟盐", "含氟"],
+        "strict_indicators": ["氟化工", "氟盐", "含氟"],
+        "confidence": "中",
+        "score": 22,
+    },
+    "chlorinated_chemicals": {
+        "name": "氯化精细化工",
+        "keywords": ["有机氯化工", "氯化精细化工", "氯代中间体", "副产盐酸化工"],
+        "process": "氯化反应副产盐酸或含酸废液经石灰中和时，可能形成液体氯化钙。",
+        "pitch": "核实副产盐酸量、石灰中和工段、液钙有机杂质和稳定产生周期。",
+        "indicators": ["氯化", "氯代", "有机氯", "精细化工"],
+        "strict_indicators": ["氯化", "氯代", "有机氯"],
+        "confidence": "中",
+        "score": 25,
+    },
+    "pickling": {
+        "name": "酸洗/金属表面处理",
+        "keywords": ["盐酸酸洗", "金属表面处理", "钢材酸洗", "废盐酸资源化"],
+        "process": "盐酸酸洗废液若采用石灰中和，会形成含氯化钙盐水，但也可能以氯化亚铁为主。",
+        "pitch": "先核实废酸成分和处理路线，排查铁离子、重金属及是否具备液钙利用价值。",
+        "indicators": ["酸洗", "表面处理", "废盐酸", "钢材"],
+        "strict_indicators": ["酸洗", "废盐酸"],
+        "confidence": "待核验",
+        "score": 18,
+    },
+}
+
+UPSTREAM_SUPPLIER_WORDS = ["氯化钙", "融雪剂", "干燥剂", "化工原料", "化工贸易", "经销"]
+UPSTREAM_INDUSTRIAL_WORDS = [
+    "公司",
+    "集团",
+    "有限",
+    "厂",
+    "工业",
+    "生产",
+    "制造",
+    "冶炼",
+    "材料",
+    "资源",
+    "科技",
+    "化工",
+    "环保",
+    "项目",
+    "基地",
+    "园区",
+]
+UPSTREAM_CONSUMER_WORDS = [
+    "餐饮",
+    "茶饮",
+    "饭店",
+    "酒店",
+    "宾馆",
+    "超市",
+    "商店",
+    "便利店",
+    "锅饼",
+    "单饼",
+    "食品",
+    "洗衣",
+    "洗鞋",
+    "地坪",
+    "涂料",
+    "建材门市",
+    "装饰",
+    "培训",
+    "学校",
+]
+
 
 REGION_PRESETS: dict[str, list[str]] = {
     "north": ["北京", "天津", "河北", "山西", "内蒙古"],
@@ -177,6 +321,9 @@ class Lead:
     poi_id: str = ""
     location: str = ""
     updated_at: str = ""
+    direction: str = "downstream"
+    process_basis: str = ""
+    confidence: str = ""
 
 
 def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -191,10 +338,12 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int =
 def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
     if not input_regions:
         return ["山东", "河北", "辽宁", "吉林", "黑龙江", "江苏"]
-    if isinstance(input_regions, str):
-        parts = re.split(r"[,，\s]+", input_regions)
-    else:
-        parts = input_regions
+    raw_parts = [input_regions] if isinstance(input_regions, str) else input_regions
+    parts = [
+        part
+        for raw_part in raw_parts
+        for part in re.split(r"[,，、;\s]+", str(raw_part))
+    ]
 
     regions: list[str] = []
     for part in parts:
@@ -208,10 +357,19 @@ def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
     return list(dict.fromkeys(regions))
 
 
-def selected_sectors(ids: list[str] | None) -> dict[str, dict[str, Any]]:
+def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
+    return UPSTREAM_SECTOR_LIBRARY if direction == "upstream" else SECTOR_LIBRARY
+
+
+def selected_sectors(ids: list[str] | None, direction: str) -> dict[str, dict[str, Any]]:
+    library = get_sector_library(direction)
     if not ids:
-        ids = ["snow", "desiccant", "water", "concrete", "trader"]
-    return {sector_id: SECTOR_LIBRARY[sector_id] for sector_id in ids if sector_id in SECTOR_LIBRARY}
+        ids = (
+            ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"]
+            if direction == "upstream"
+            else ["snow", "desiccant", "water", "concrete", "trader"]
+        )
+    return {sector_id: library[sector_id] for sector_id in ids if sector_id in library}
 
 
 def lead_score(name: str, raw_type: str, base: int, has_phone: bool) -> tuple[int, str]:
@@ -227,6 +385,41 @@ def lead_score(name: str, raw_type: str, base: int, has_phone: bool) -> tuple[in
     return min(score, 100), "、".join(hits) if hits else "行业关键词匹配"
 
 
+def upstream_lead_score(
+    name: str,
+    raw_type: str,
+    sector: dict[str, Any],
+    has_phone: bool,
+) -> tuple[int, str, str]:
+    text = f"{name} {raw_type}"
+    hits = [word for word in sector["indicators"] if word in text]
+    score = int(sector["score"]) + min(30, len(hits) * 10)
+    if has_phone:
+        score += 12
+    if any(word in text for word in ["生产", "制造", "冶炼", "材料", "资源", "工业"]):
+        score += 8
+    confidence = sector["confidence"]
+    if not hits:
+        confidence = "待核验"
+    reason = "、".join(hits) if hits else "仅搜索关键词命中，需核验实际工艺"
+    return min(score, 100), reason, confidence
+
+
+def upstream_match_quality(
+    name: str,
+    raw_type: str,
+    sector: dict[str, Any],
+) -> tuple[bool, bool]:
+    text = f"{name} {raw_type}"
+    if any(word in text for word in UPSTREAM_CONSUMER_WORDS):
+        return False, False
+
+    strict_indicators = sector.get("strict_indicators") or sector["indicators"]
+    indicator_hit = any(word in text for word in strict_indicators)
+    industrial_hit = any(word in text for word in UPSTREAM_INDUSTRIAL_WORDS)
+    return True, indicator_hit and industrial_hit
+
+
 def amap_search(
     key: str,
     city: str,
@@ -240,7 +433,7 @@ def amap_search(
             "key": key,
             "keywords": keyword,
             "city": city,
-            "citylimit": "false",
+            "citylimit": "true",
             "offset": str(offset),
             "page": str(page),
             "extensions": "all",
@@ -285,7 +478,12 @@ def first_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def fallback_leads(regions: list[str], sectors: dict[str, dict[str, Any]], custom_keywords: list[str]) -> list[Lead]:
+def fallback_leads(
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    direction: str,
+) -> list[Lead]:
     leads: list[Lead] = []
     for region in regions:
         for sector in sectors.values():
@@ -302,12 +500,15 @@ def fallback_leads(regions: list[str], sectors: dict[str, dict[str, Any]], custo
                         sector=sector["name"],
                         source="开发任务",
                         score=int(sector["score"]) + 18,
-                        use_case=sector["uses"],
+                        use_case=sector.get("uses") or sector.get("process", ""),
                         pitch=sector["pitch"],
                         match_reason=f"建议批量搜索：{region} + {keyword}",
                         search_url=links["baidu"],
                         website=links["amap"],
                         qcc_url=links["qcc"],
+                        direction=direction,
+                        process_basis=sector.get("process", ""),
+                        confidence=sector.get("confidence", ""),
                     )
                 )
     return leads
@@ -320,6 +521,9 @@ def collect_amap_leads(
     custom_keywords: list[str],
     pages: int,
     keyword_limit: int,
+    direction: str,
+    exclude_suppliers: bool,
+    strict_upstream: bool,
     progress_callback: Any = None,
 ) -> tuple[list[Lead], list[str]]:
     leads: list[Lead] = []
@@ -390,6 +594,13 @@ def collect_amap_leads(
                 address = as_text(poi.get("address"))
                 phone = as_text(poi.get("tel")).replace(";", " / ")
                 raw_type = as_text(poi.get("type"))
+                if direction == "upstream":
+                    upstream_text = f"{name} {raw_type}"
+                    if exclude_suppliers and any(word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS):
+                        continue
+                    allowed, strong_match = upstream_match_quality(name, raw_type, sector)
+                    if not allowed or (strict_upstream and not strong_match):
+                        continue
                 alias = as_text(poi.get("alias"))
                 email = as_text(poi.get("email"))
                 company_website = first_text(poi.get("website"))
@@ -400,7 +611,16 @@ def collect_amap_leads(
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
-                score, reason = lead_score(name, raw_type, int(sector["score"]), bool(phone))
+                if direction == "upstream":
+                    score, reason, confidence = upstream_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                else:
+                    score, reason = lead_score(name, raw_type, int(sector["score"]), bool(phone))
+                    confidence = ""
                 links = build_search_links(name, region, keyword)
                 leads.append(
                     Lead(
@@ -412,9 +632,13 @@ def collect_amap_leads(
                         phone=phone,
                         address=address,
                         website=links["baidu"],
-                        use_case=sector["uses"],
+                        use_case=sector.get("uses") or sector.get("process", ""),
                         pitch=sector["pitch"],
-                        match_reason=f"{keyword}；{reason}",
+                        match_reason=(
+                            f"{keyword}；工艺线索：{reason}"
+                            if direction == "upstream"
+                            else f"{keyword}；{reason}"
+                        ),
                         search_url=links["amap"],
                         raw_type=raw_type,
                         qcc_url=links["qcc"],
@@ -424,6 +648,9 @@ def collect_amap_leads(
                         poi_id=poi_id,
                         location=location,
                         updated_at=updated_at,
+                        direction=direction,
+                        process_basis=sector.get("process", ""),
+                        confidence=confidence,
                     )
                 )
             completed += 1
@@ -461,8 +688,9 @@ def procurement_links(regions: list[str]) -> list[Lead]:
 
 
 def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
+    direction = "upstream" if payload.get("direction") == "upstream" else "downstream"
     regions = normalize_regions(payload.get("regions"))
-    sectors = selected_sectors(payload.get("sectors"))
+    sectors = selected_sectors(payload.get("sectors"), direction)
     custom_keywords = [
         item.strip()
         for item in re.split(r"[,，\n]+", str(payload.get("customKeywords") or ""))
@@ -473,6 +701,8 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     keyword_limit = 2 if fast_mode else 8
     amap_key = str(os.getenv("AMAP_KEY") or payload.get("amapKey") or "").strip()
     require_amap = bool(payload.get("requireAmap"))
+    exclude_suppliers = bool(payload.get("excludeSuppliers", True))
+    strict_upstream = bool(payload.get("strictUpstream", True))
 
     errors: list[str] = []
     if require_amap and not amap_key:
@@ -486,15 +716,18 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             custom_keywords,
             pages,
             keyword_limit,
+            direction,
+            exclude_suppliers,
+            strict_upstream,
             progress_callback,
         )
         if not leads:
-            leads = fallback_leads(regions, sectors, custom_keywords)
+            leads = fallback_leads(regions, sectors, custom_keywords, direction)
             errors.append("未采集到高德结果，已生成搜索任务清单。")
     else:
-        leads = fallback_leads(regions, sectors, custom_keywords)
+        leads = fallback_leads(regions, sectors, custom_keywords, direction)
 
-    if payload.get("includeProcurement", True) and not require_amap:
+    if payload.get("includeProcurement", True) and not require_amap and direction == "downstream":
         leads.extend(procurement_links(regions))
 
     leads = sorted(leads, key=lambda item: item.score, reverse=True)
@@ -511,6 +744,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             ) * max(1, min(pages, 10)),
             "workers": AMAP_WORKERS,
             "fastMode": fast_mode,
+            "direction": direction,
+            "excludeSuppliers": exclude_suppliers,
+            "strictUpstream": strict_upstream,
             "regions": regions,
             "sectors": [item["name"] for item in sectors.values()],
             "mode": "amap" if amap_key else "need_key" if require_amap else "task",
@@ -620,6 +856,9 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
         "poi_id",
         "location",
         "updated_at",
+        "direction",
+        "process_basis",
+        "confidence",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
@@ -715,6 +954,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self,
                 {
                     "sectors": SECTOR_LIBRARY,
+                    "downstreamSectors": SECTOR_LIBRARY,
+                    "upstreamSectors": UPSTREAM_SECTOR_LIBRARY,
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
                 },

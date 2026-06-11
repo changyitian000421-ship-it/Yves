@@ -118,6 +118,52 @@ h1 {
   gap: 8px;
 }
 
+.direction-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.direction-control label {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.direction-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.direction-control span {
+  display: grid;
+  place-items: center;
+  min-height: 42px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.direction-control input:checked + span {
+  border-color: var(--accent);
+  color: white;
+  background: var(--accent);
+}
+
+.direction-note {
+  padding: 10px 11px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  background: var(--soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .region-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -504,6 +550,30 @@ tbody tr:hover {
   color: var(--blue);
   background: transparent;
   font-weight: 700;
+}
+
+.confidence {
+  display: inline-block;
+  margin: 7px 0 0;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.confidence-high {
+  color: #067647;
+  background: #ecfdf3;
+}
+
+.confidence-medium {
+  color: #b54708;
+  background: #fffaeb;
+}
+
+.confidence-review {
+  color: #475467;
+  background: #f2f4f7;
 }
 
 .company-dialog {

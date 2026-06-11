@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>氯化钙买家线索采集器</title>
+    <title>氯化钙产业线索采集器</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -12,12 +12,29 @@
         <div class="brand">
           <div class="mark">Ca</div>
           <div>
-            <h1>氯化钙买家线索采集器</h1>
-            <p>中国市场 · 行业反向开发 · 批量导出</p>
+            <h1>氯化钙产业线索采集器</h1>
+            <p>下游买家 · 上游副产企业 · 批量导出</p>
           </div>
         </div>
 
         <form id="lead-form" class="controls">
+          <section>
+            <div class="section-title">采集方向</div>
+            <div class="direction-control" role="radiogroup" aria-label="采集方向">
+              <label>
+                <input type="radio" name="direction" value="downstream" checked />
+                <span>下游买家</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="upstream" />
+                <span>上游液钙副产企业</span>
+              </label>
+            </div>
+            <div id="direction-note" class="direction-note">
+              查找可能采购氯化钙的下游企业。
+            </div>
+          </section>
+
           <section>
             <div class="section-title">目标地区</div>
             <div class="region-grid">
@@ -36,7 +53,7 @@
           </section>
 
           <section>
-            <div class="section-title">下游行业</div>
+            <div id="sector-title" class="section-title">下游行业</div>
             <div id="sector-list" class="sector-list"></div>
           </section>
 
@@ -64,10 +81,18 @@
               <input id="fast-mode" type="checkbox" checked />
               <span>快速模式</span>
             </label>
+            <label id="exclude-suppliers-wrap" class="toggle" hidden>
+              <input id="exclude-suppliers" type="checkbox" checked />
+              <span>排除明显氯化钙供应商/贸易商</span>
+            </label>
+            <label id="strict-upstream-wrap" class="toggle" hidden>
+              <input id="strict-upstream" type="checkbox" checked />
+              <span>严格匹配工业企业和工艺特征</span>
+            </label>
           </section>
 
           <button class="primary" type="submit">
-            <span>采集具体公司和电话</span>
+            <span id="collect-button-label">采集具体公司和电话</span>
           </button>
         </form>
       </aside>
@@ -76,7 +101,7 @@
         <header class="topbar">
           <div>
             <div class="eyebrow">Lead cockpit</div>
-            <h2>潜在买家列表</h2>
+            <h2 id="result-title">潜在买家列表</h2>
           </div>
           <div class="actions">
             <button id="task-button" class="secondary" type="button">生成开发任务</button>
@@ -149,8 +174,8 @@
                 <th>行业</th>
                 <th>地区</th>
                 <th>电话</th>
-                <th>匹配原因</th>
-                <th>跟进话术</th>
+                <th id="reason-heading">匹配原因</th>
+                <th id="pitch-heading">跟进话术</th>
                 <th>动作</th>
               </tr>
             </thead>
