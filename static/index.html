@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>氯化钙买家线索采集器</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">Ca</div>
+          <div>
+            <h1>氯化钙买家线索采集器</h1>
+            <p>中国市场 · 行业反向开发 · 批量导出</p>
+          </div>
+        </div>
+
+        <form id="lead-form" class="controls">
+          <section>
+            <div class="section-title">目标地区</div>
+            <div class="region-grid">
+              <label><input type="checkbox" name="regionPreset" value="north" /> 华北</label>
+              <label><input type="checkbox" name="regionPreset" value="northeast" checked /> 东北</label>
+              <label><input type="checkbox" name="regionPreset" value="east" checked /> 华东</label>
+              <label><input type="checkbox" name="regionPreset" value="central" /> 华中</label>
+              <label><input type="checkbox" name="regionPreset" value="south" /> 华南</label>
+              <label><input type="checkbox" name="regionPreset" value="southwest" /> 西南</label>
+              <label><input type="checkbox" name="regionPreset" value="northwest" /> 西北</label>
+            </div>
+            <label class="field">
+              <span>自定义省市</span>
+              <input id="regions" type="text" placeholder="例如：山东, 河北, 黑龙江" />
+            </label>
+          </section>
+
+          <section>
+            <div class="section-title">下游行业</div>
+            <div id="sector-list" class="sector-list"></div>
+          </section>
+
+          <section>
+            <label class="field">
+              <span>补充关键词</span>
+              <textarea id="custom-keywords" rows="3" placeholder="例如：融雪剂厂家, 集装箱干燥剂, 钻井液"></textarea>
+            </label>
+            <div id="api-status" class="api-status">正在检查采集服务...</div>
+            <div class="inline-fields">
+              <label class="field small">
+                <span>采集页数</span>
+                <input id="pages" type="number" min="1" max="10" value="1" />
+              </label>
+              <label class="toggle">
+                <input id="include-procurement" type="checkbox" checked />
+                <span>加入招采监控</span>
+              </label>
+            </div>
+            <label class="toggle">
+              <input id="only-phone" type="checkbox" checked />
+              <span>只看有电话</span>
+            </label>
+          </section>
+
+          <button class="primary" type="submit">
+            <span>采集具体公司和电话</span>
+          </button>
+        </form>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">Lead cockpit</div>
+            <h2>潜在买家列表</h2>
+          </div>
+          <div class="actions">
+            <button id="task-button" class="secondary" type="button">生成开发任务</button>
+            <button id="export-button" class="secondary" type="button" disabled>导出 CSV</button>
+            <button id="logout-button" class="secondary" type="button">退出</button>
+          </div>
+        </header>
+
+        <section class="metrics" aria-label="统计">
+          <div>
+            <span id="metric-count">0</span>
+            <p>线索数量</p>
+          </div>
+          <div>
+            <span id="metric-hot">0</span>
+            <p>高潜线索</p>
+          </div>
+          <div>
+            <span id="metric-phone">0</span>
+            <p>含电话</p>
+          </div>
+          <div>
+            <span id="metric-mode">待开始</span>
+            <p>采集模式</p>
+          </div>
+        </section>
+
+        <section class="filters">
+          <label class="field search">
+            <span>快速筛选</span>
+            <input id="filter" type="search" placeholder="输入公司、行业、地区、用途" />
+          </label>
+          <div class="chips" id="quick-filters">
+            <button type="button" data-filter="">全部</button>
+            <button type="button" data-filter="融雪">融雪</button>
+            <button type="button" data-filter="干燥剂">干燥剂</button>
+            <button type="button" data-filter="水处理">水处理</button>
+            <button type="button" data-filter="化工">化工贸易</button>
+          </div>
+        </section>
+
+        <section id="notice" class="notice">
+          当前无采集任务。
+        </section>
+
+        <section class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>评分</th>
+                <th>公司/任务</th>
+                <th>行业</th>
+                <th>地区</th>
+                <th>电话</th>
+                <th>匹配原因</th>
+                <th>跟进话术</th>
+                <th>动作</th>
+              </tr>
+            </thead>
+            <tbody id="lead-body">
+              <tr class="empty-row">
+                <td colspan="8">还没有线索。选择地区和行业后开始生成。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

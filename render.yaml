@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: calcium-chloride-leads
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_PASSWORD
+        sync: false
+      - key: AMAP_KEY
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
