@@ -64,10 +64,19 @@ SMS_SEND_LIMIT = 5
 SMS_CODES: dict[str, dict[str, Any]] = {}
 SMS_SEND_ATTEMPTS: dict[str, list[float]] = {}
 SMS_LOCK = threading.Lock()
-ALIYUN_SMS_ACCESS_KEY_ID = os.getenv("ALIYUN_SMS_ACCESS_KEY_ID", "")
-ALIYUN_SMS_ACCESS_KEY_SECRET = os.getenv("ALIYUN_SMS_ACCESS_KEY_SECRET", "")
-ALIYUN_SMS_SIGN_NAME = os.getenv("ALIYUN_SMS_SIGN_NAME", "")
-ALIYUN_SMS_TEMPLATE_CODE = os.getenv("ALIYUN_SMS_TEMPLATE_CODE", "")
+ALIYUN_PNVS_ACCESS_KEY_ID = (
+    os.getenv("ALIYUN_PNVS_ACCESS_KEY_ID")
+    or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID")
+    or os.getenv("ALIYUN_SMS_ACCESS_KEY_ID", "")
+)
+ALIYUN_PNVS_ACCESS_KEY_SECRET = (
+    os.getenv("ALIYUN_PNVS_ACCESS_KEY_SECRET")
+    or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+    or os.getenv("ALIYUN_SMS_ACCESS_KEY_SECRET", "")
+)
+ALIYUN_PNVS_SCHEME_NAME = os.getenv("ALIYUN_PNVS_SCHEME_NAME", "")
+ALIYUN_PNVS_SIGN_NAME = os.getenv("ALIYUN_PNVS_SIGN_NAME", "速通互联验证码")
+ALIYUN_PNVS_TEMPLATE_CODE = os.getenv("ALIYUN_PNVS_TEMPLATE_CODE", "100001")
 AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
 SEARCH_JOBS: dict[str, dict[str, Any]] = {}
@@ -437,35 +446,25 @@ def valid_login_phone(phone: str) -> bool:
 
 
 def sms_configured() -> bool:
-    return all(
-        [
-            ALIYUN_SMS_ACCESS_KEY_ID,
-            ALIYUN_SMS_ACCESS_KEY_SECRET,
-            ALIYUN_SMS_SIGN_NAME,
-            ALIYUN_SMS_TEMPLATE_CODE,
-        ]
-    )
+    return bool(ALIYUN_PNVS_ACCESS_KEY_ID and ALIYUN_PNVS_ACCESS_KEY_SECRET)
 
 
 def aliyun_percent_encode(value: Any) -> str:
     return quote(str(value), safe="~")
 
 
-def send_aliyun_sms(phone: str, code: str) -> None:
+def aliyun_pnvs_request(action: str, action_params: dict[str, Any]) -> dict[str, Any]:
     params = {
-        "AccessKeyId": ALIYUN_SMS_ACCESS_KEY_ID,
-        "Action": "SendSms",
+        "AccessKeyId": ALIYUN_PNVS_ACCESS_KEY_ID,
+        "Action": action,
         "Format": "JSON",
-        "PhoneNumbers": phone,
         "RegionId": "cn-hangzhou",
-        "SignName": ALIYUN_SMS_SIGN_NAME,
         "SignatureMethod": "HMAC-SHA1",
         "SignatureNonce": uuid.uuid4().hex,
         "SignatureVersion": "1.0",
-        "TemplateCode": ALIYUN_SMS_TEMPLATE_CODE,
-        "TemplateParam": json.dumps({"code": code}, ensure_ascii=False, separators=(",", ":")),
         "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "Version": "2017-05-25",
+        **action_params,
     }
     canonicalized = "&".join(
         f"{aliyun_percent_encode(key)}={aliyun_percent_encode(params[key])}"
@@ -473,12 +472,12 @@ def send_aliyun_sms(phone: str, code: str) -> None:
     )
     string_to_sign = f"GET&%2F&{aliyun_percent_encode(canonicalized)}"
     digest = hmac.new(
-        f"{ALIYUN_SMS_ACCESS_KEY_SECRET}&".encode("utf-8"),
+        f"{ALIYUN_PNVS_ACCESS_KEY_SECRET}&".encode("utf-8"),
         string_to_sign.encode("utf-8"),
         hashlib.sha1,
     ).digest()
     params["Signature"] = base64.b64encode(digest).decode("ascii")
-    url = "https://dysmsapi.aliyuncs.com/?" + "&".join(
+    url = "https://dypnsapi.aliyuncs.com/?" + "&".join(
         f"{aliyun_percent_encode(key)}={aliyun_percent_encode(params[key])}"
         for key in sorted(params)
     )
@@ -486,7 +485,44 @@ def send_aliyun_sms(phone: str, code: str) -> None:
     with urlopen(req, timeout=15, context=DEFAULT_SSL_CONTEXT) as resp:
         result = json.loads(resp.read().decode("utf-8"))
     if result.get("Code") != "OK":
-        raise RuntimeError(str(result.get("Message") or result.get("Code") or "短信发送失败"))
+        raise RuntimeError(str(result.get("Message") or result.get("Code") or "短信认证请求失败"))
+    return result
+
+
+def send_aliyun_verify_code(phone: str) -> None:
+    params: dict[str, Any] = {
+        "PhoneNumber": phone,
+        "CountryCode": "86",
+        "CodeLength": 6,
+        "CodeType": 1,
+        "ValidTime": SMS_CODE_TTL,
+        "Interval": SMS_SEND_COOLDOWN,
+        "DuplicatePolicy": 1,
+        "ReturnVerifyCode": "false",
+        "SignName": ALIYUN_PNVS_SIGN_NAME,
+        "TemplateCode": ALIYUN_PNVS_TEMPLATE_CODE,
+        "TemplateParam": json.dumps(
+            {"code": "##code##", "min": max(1, SMS_CODE_TTL // 60)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    }
+    if ALIYUN_PNVS_SCHEME_NAME:
+        params["SchemeName"] = ALIYUN_PNVS_SCHEME_NAME
+    aliyun_pnvs_request("SendSmsVerifyCode", params)
+
+
+def check_aliyun_verify_code(phone: str, code: str) -> bool:
+    params: dict[str, Any] = {
+        "PhoneNumber": phone,
+        "CountryCode": "86",
+        "VerifyCode": code,
+    }
+    if ALIYUN_PNVS_SCHEME_NAME:
+        params["SchemeName"] = ALIYUN_PNVS_SCHEME_NAME
+    result = aliyun_pnvs_request("CheckSmsVerifyCode", params)
+    model = result.get("Model") or {}
+    return str(model.get("VerifyResult") or "").upper() == "PASS"
 
 
 def code_digest(phone: str, code: str) -> str:
@@ -1759,7 +1795,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok", "version": "procurement-monitor-v1"})
+            json_response(self, {"status": "ok", "version": "pnvs-login-v1"})
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
@@ -1773,7 +1809,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             if path.startswith("/api/"):
                 json_response(self, {"error": "请先登录"}, 401)
             else:
-                self.redirect("/login?v=sms-login-1")
+                self.redirect("/login?v=pnvs-login-1")
             return
         if path == "/api/config":
             json_response(
@@ -1832,26 +1868,31 @@ class AppHandler(SimpleHTTPRequestHandler):
                 json_response(self, {"error": reason}, 429)
                 return
             if not sms_configured() and not SMS_DEV_MODE:
-                json_response(self, {"error": "服务器尚未配置短信服务"}, 503)
+                json_response(self, {"error": "服务器尚未配置阿里云短信认证服务"}, 503)
                 return
-            code = f"{secrets.randbelow(1_000_000):06d}"
+            code = f"{secrets.randbelow(1_000_000):06d}" if SMS_DEV_MODE and not sms_configured() else ""
             try:
                 if sms_configured():
-                    send_aliyun_sms(phone, code)
+                    send_aliyun_verify_code(phone)
             except Exception as exc:  # noqa: BLE001
                 json_response(self, {"error": f"验证码发送失败：{exc}"}, 502)
                 return
             now = time.time()
             with SMS_LOCK:
                 SMS_CODES[phone] = {
-                    "digest": code_digest(phone, code),
-                    "expiresAt": now + SMS_CODE_TTL,
                     "sentAt": now,
-                    "attempts": 0,
                 }
+                if code:
+                    SMS_CODES[phone].update(
+                        {
+                            "digest": code_digest(phone, code),
+                            "expiresAt": now + SMS_CODE_TTL,
+                            "attempts": 0,
+                        }
+                    )
                 SMS_SEND_ATTEMPTS.setdefault(self.client_id(), []).append(now)
             response: dict[str, Any] = {"ok": True, "expiresIn": SMS_CODE_TTL}
-            if SMS_DEV_MODE and not sms_configured():
+            if code:
                 response["devCode"] = code
             json_response(self, response)
             return
@@ -1870,24 +1911,33 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.record_login_failure()
                 json_response(self, {"error": "手机号或密码错误"}, 401)
                 return
-            now = time.time()
-            with SMS_LOCK:
-                saved_code = SMS_CODES.get(phone)
-                if not saved_code or now > float(saved_code.get("expiresAt", 0)):
-                    SMS_CODES.pop(phone, None)
-                    saved_code = None
-                elif int(saved_code.get("attempts", 0)) >= 5:
-                    SMS_CODES.pop(phone, None)
-                    saved_code = None
-                elif not hmac.compare_digest(
-                    str(saved_code.get("digest") or ""),
-                    code_digest(phone, code),
-                ):
-                    saved_code["attempts"] = int(saved_code.get("attempts", 0)) + 1
-                    saved_code = None
-                else:
-                    SMS_CODES.pop(phone, None)
-            if not saved_code:
+            verified = False
+            if sms_configured():
+                try:
+                    verified = check_aliyun_verify_code(phone, code)
+                except Exception as exc:  # noqa: BLE001
+                    json_response(self, {"error": f"验证码核验失败：{exc}"}, 502)
+                    return
+            elif SMS_DEV_MODE:
+                now = time.time()
+                with SMS_LOCK:
+                    saved_code = SMS_CODES.get(phone)
+                    if not saved_code or now > float(saved_code.get("expiresAt", 0)):
+                        SMS_CODES.pop(phone, None)
+                        saved_code = None
+                    elif int(saved_code.get("attempts", 0)) >= 5:
+                        SMS_CODES.pop(phone, None)
+                        saved_code = None
+                    elif not hmac.compare_digest(
+                        str(saved_code.get("digest") or ""),
+                        code_digest(phone, code),
+                    ):
+                        saved_code["attempts"] = int(saved_code.get("attempts", 0)) + 1
+                        saved_code = None
+                    else:
+                        SMS_CODES.pop(phone, None)
+                        verified = True
+            if not verified:
                 self.record_login_failure()
                 json_response(self, {"error": "验证码错误或已过期"}, 401)
                 return
@@ -1972,7 +2022,7 @@ def main() -> None:
     if not LOGIN_PHONES:
         print("WARNING: LOGIN_PHONES is not set. Only SMS_DEV_MODE can allow local login.")
     if not sms_configured() and not SMS_DEV_MODE:
-        print("WARNING: Aliyun SMS is not configured. Verification codes cannot be sent.")
+        print("WARNING: Aliyun PNVS is not configured. Verification codes cannot be sent.")
     if not os.getenv("AMAP_KEY"):
         print("WARNING: AMAP_KEY is not set. Company collection will remain disabled.")
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)

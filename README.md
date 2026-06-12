@@ -50,12 +50,15 @@ http://127.0.0.1:8765
 2. 在 Render 创建 Blueprint，选择该仓库。
 3. 填写环境变量 `APP_PASSWORD`、`LOGIN_PHONES` 和 `AMAP_KEY`。
 4. `SESSION_SECRET` 会由 Render 自动生成。
-5. 配置阿里云短信变量：
-   `ALIYUN_SMS_ACCESS_KEY_ID`、`ALIYUN_SMS_ACCESS_KEY_SECRET`、
-   `ALIYUN_SMS_SIGN_NAME`、`ALIYUN_SMS_TEMPLATE_CODE`。
+5. 开通阿里云“号码认证服务 > 短信认证”，配置：
+   `ALIYUN_PNVS_ACCESS_KEY_ID`、`ALIYUN_PNVS_ACCESS_KEY_SECRET`。
+   如控制台要求方案名称，再填写 `ALIYUN_PNVS_SCHEME_NAME`。
+   系统默认使用短信认证服务赠送的签名 `速通互联验证码` 和模板 `100001`。
 6. 部署成功后即可获得固定的 HTTPS 地址。
 
 不要把密码或高德 Key 写进 Git 仓库。高德 Key 只保存在云平台环境变量中。
+正式部署不要配置 `SMS_DEV_MODE`。验证码由阿里云生成并通过
+`CheckSmsVerifyCode` 核验，网站不会保存生产验证码。
 
 ## 高德 API Key
 

@@ -11,13 +11,11 @@ services:
         sync: false
       - key: AMAP_KEY
         sync: false
-      - key: ALIYUN_SMS_ACCESS_KEY_ID
+      - key: ALIYUN_PNVS_ACCESS_KEY_ID
         sync: false
-      - key: ALIYUN_SMS_ACCESS_KEY_SECRET
+      - key: ALIYUN_PNVS_ACCESS_KEY_SECRET
         sync: false
-      - key: ALIYUN_SMS_SIGN_NAME
-        sync: false
-      - key: ALIYUN_SMS_TEMPLATE_CODE
+      - key: ALIYUN_PNVS_SCHEME_NAME
         sync: false
       - key: SESSION_SECRET
         generateValue: true

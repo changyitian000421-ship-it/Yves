@@ -182,7 +182,7 @@ function renderLeads() {
 async function fetchConfig() {
   const response = await fetch("/api/config");
   if (response.status === 401) {
-    window.location.href = "/login?v=sms-login-1";
+    window.location.href = "/login?v=pnvs-login-1";
     return;
   }
   if (!response.ok) throw new Error("配置加载失败");
@@ -349,7 +349,7 @@ async function runSearch(mode = "amap") {
       body: JSON.stringify(payload),
     });
     if (response.status === 401) {
-      window.location.href = "/login?v=sms-login-1";
+      window.location.href = "/login?v=pnvs-login-1";
       return;
     }
     if (!response.ok) throw new Error("无法启动采集任务");
@@ -403,7 +403,7 @@ async function pollSearchJob(jobId) {
   while (state.activeJobId === jobId) {
     const response = await fetch(`/api/search/status?id=${encodeURIComponent(jobId)}`);
     if (response.status === 401) {
-      window.location.href = "/login?v=sms-login-1";
+      window.location.href = "/login?v=pnvs-login-1";
       throw new Error("登录已过期");
     }
     const job = await response.json();
@@ -518,7 +518,7 @@ async function logout() {
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
-  window.location.href = "/login?v=sms-login-1";
+  window.location.href = "/login?v=pnvs-login-1";
 }
 
 function bindEvents() {

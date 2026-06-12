@@ -84,7 +84,7 @@ form.addEventListener("submit", async (event) => {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "登录失败");
-    window.location.href = "/?v=sms-login-1";
+    window.location.href = "/?v=pnvs-login-1";
   } catch (loginError) {
     error.textContent = loginError.message;
   } finally {
