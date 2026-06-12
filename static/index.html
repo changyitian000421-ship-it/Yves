@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=sms-login-1" />
   </head>
   <body>
     <div class="app">
@@ -13,7 +13,7 @@
           <div class="mark">Ca</div>
           <div>
             <h1>氯化钙产业线索采集器</h1>
-            <p>下游买家 · 上游副产企业 · 批量导出</p>
+            <p>下游买家 · 上游副产企业 · 招采监控</p>
           </div>
         </div>
 
@@ -28,6 +28,10 @@
               <label>
                 <input type="radio" name="direction" value="upstream" />
                 <span>上游液钙副产企业</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="procurement" />
+                <span>招投标/采购监控</span>
               </label>
             </div>
             <div id="direction-note" class="direction-note">
@@ -63,21 +67,17 @@
               <textarea id="custom-keywords" rows="3" placeholder="例如：融雪剂厂家, 集装箱干燥剂, 钻井液"></textarea>
             </label>
             <div id="api-status" class="api-status">正在检查采集服务...</div>
-            <div class="inline-fields">
-              <label class="field small">
+            <div id="amap-options" class="inline-fields">
+              <label id="pages-wrap" class="field small">
                 <span>采集页数</span>
                 <input id="pages" type="number" min="1" max="10" value="1" />
               </label>
-              <label class="toggle">
-                <input id="include-procurement" type="checkbox" checked />
-                <span>加入招采监控</span>
-              </label>
             </div>
-            <label class="toggle">
+            <label id="only-phone-wrap" class="toggle">
               <input id="only-phone" type="checkbox" checked />
               <span>只看有电话</span>
             </label>
-            <label class="toggle">
+            <label id="fast-mode-wrap" class="toggle">
               <input id="fast-mode" type="checkbox" checked />
               <span>快速模式</span>
             </label>
@@ -89,6 +89,37 @@
               <input id="strict-upstream" type="checkbox" checked />
               <span>严格匹配工业企业和工艺特征</span>
             </label>
+            <div id="procurement-options" class="procurement-options" hidden>
+              <div class="section-title">采集来源</div>
+              <div class="notice-type-grid">
+                <label>
+                  <input type="checkbox" name="procurementSource" value="public_platform" checked />
+                  公共资源平台
+                </label>
+                <label>
+                  <input type="checkbox" name="procurementSource" value="company_website" />
+                  企业官网
+                </label>
+              </div>
+              <div class="direction-note">
+                企业官网模式会先定位符合条件的公司，再检查其官网采购、招标、询价和供应商公告。
+              </div>
+              <div class="section-title">公告类型</div>
+              <div class="notice-type-grid">
+                <label><input type="checkbox" name="noticeType" value="purchase" checked />采购公告</label>
+                <label><input type="checkbox" name="noticeType" value="tender" checked />招标公告</label>
+                <label><input type="checkbox" name="noticeType" value="award" checked />中标/成交</label>
+              </div>
+              <label class="field">
+                <span>监控时间范围</span>
+                <select id="date-window">
+                  <option value="3d">近3天</option>
+                  <option value="10d" selected>近10天</option>
+                  <option value="30d">近30天</option>
+                  <option value="90d">近90天</option>
+                </select>
+              </label>
+            </div>
           </section>
 
           <button class="primary" type="submit">
@@ -113,15 +144,15 @@
         <section class="metrics" aria-label="统计">
           <div>
             <span id="metric-count">0</span>
-            <p>线索数量</p>
+            <p id="metric-count-label">线索数量</p>
           </div>
           <div>
             <span id="metric-hot">0</span>
-            <p>高潜线索</p>
+            <p id="metric-hot-label">高潜线索</p>
           </div>
           <div>
             <span id="metric-phone">0</span>
-            <p>含电话</p>
+            <p id="metric-phone-label">含电话</p>
           </div>
           <div>
             <span id="metric-mode">待开始</span>
@@ -159,9 +190,9 @@
             <div id="progress-bar" class="progress-bar"></div>
           </div>
           <div class="progress-stats">
-            <span><strong id="progress-requests">0 / 0</strong> 请求</span>
-            <span><strong id="progress-companies">0</strong> 企业</span>
-            <span><strong id="progress-phones">0</strong> 有电话</span>
+            <span><strong id="progress-requests">0 / 0</strong> <span id="progress-requests-label">请求</span></span>
+            <span><strong id="progress-companies">0</strong> <span id="progress-companies-label">企业</span></span>
+            <span><strong id="progress-phones">0</strong> <span id="progress-phones-label">有电话</span></span>
           </div>
         </section>
 
@@ -201,6 +232,6 @@
       <div id="detail-actions" class="dialog-actions"></div>
     </dialog>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=sms-login-1"></script>
   </body>
 </html>

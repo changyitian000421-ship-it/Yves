@@ -16,6 +16,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -28,11 +29,13 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
+from datetime import date, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode, urlparse
+from html.parser import HTMLParser
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -46,9 +49,25 @@ DEFAULT_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
 SESSION_MAX_AGE = 12 * 60 * 60
+LOGIN_PHONES = {
+    re.sub(r"\D", "", phone).removeprefix("86")
+    for phone in re.split(r"[,，;\s]+", os.getenv("LOGIN_PHONES") or os.getenv("LOGIN_PHONE", ""))
+    if phone.strip()
+}
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_WINDOW = 10 * 60
 LOGIN_LIMIT = 8
+SMS_DEV_MODE = os.getenv("SMS_DEV_MODE", "").lower() in {"1", "true", "yes", "on"}
+SMS_CODE_TTL = 5 * 60
+SMS_SEND_COOLDOWN = 60
+SMS_SEND_LIMIT = 5
+SMS_CODES: dict[str, dict[str, Any]] = {}
+SMS_SEND_ATTEMPTS: dict[str, list[float]] = {}
+SMS_LOCK = threading.Lock()
+ALIYUN_SMS_ACCESS_KEY_ID = os.getenv("ALIYUN_SMS_ACCESS_KEY_ID", "")
+ALIYUN_SMS_ACCESS_KEY_SECRET = os.getenv("ALIYUN_SMS_ACCESS_KEY_SECRET", "")
+ALIYUN_SMS_SIGN_NAME = os.getenv("ALIYUN_SMS_SIGN_NAME", "")
+ALIYUN_SMS_TEMPLATE_CODE = os.getenv("ALIYUN_SMS_TEMPLATE_CODE", "")
 AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
 SEARCH_JOBS: dict[str, dict[str, Any]] = {}
@@ -264,14 +283,77 @@ REGION_PRESETS: dict[str, list[str]] = {
 }
 
 
-PROCUREMENT_KEYWORDS = [
-    "氯化钙",
-    "融雪剂",
-    "除冰剂",
-    "道路养护 融雪剂",
-    "水处理 氯化钙",
-    "干燥剂 氯化钙",
-]
+PROCUREMENT_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
+    "calcium_chloride": {
+        "name": "氯化钙直接采购",
+        "keywords": ["氯化钙", "无水氯化钙", "二水氯化钙"],
+        "company_keywords": ["化工原料采购", "水处理药剂", "油田化学品"],
+        "uses": "直接发现氯化钙采购、询价、框架协议和成交公告",
+        "pitch": "优先核对采购数量、含量、形态、包装、交货地和报名截止时间",
+        "score": 82,
+    },
+    "liquid_calcium_chloride": {
+        "name": "液体氯化钙",
+        "keywords": ["液体氯化钙", "液钙采购", "氯化钙溶液"],
+        "company_keywords": ["污水处理", "矿业公司", "油田化学品", "工业水处理"],
+        "uses": "发现液体氯化钙采购、询价、供应商招募和长期供货需求",
+        "pitch": "重点核对液钙浓度、杂质、月用量、储罐卸货条件和运输半径",
+        "score": 84,
+    },
+    "deicing": {
+        "name": "融雪/除冰采购",
+        "keywords": ["融雪剂", "除冰剂", "道路融雪", "公路养护融雪剂"],
+        "company_keywords": ["环卫服务公司", "道路养护公司", "公路养护", "机场集团"],
+        "uses": "监控市政、环卫、公路和机场冬季融雪物资需求",
+        "pitch": "重点确认氯盐配方、环保指标、采购吨位、供货周期和入围条件",
+        "score": 76,
+    },
+    "water_treatment": {
+        "name": "水处理药剂采购",
+        "keywords": ["水处理氯化钙", "污水处理药剂", "工业水处理药剂"],
+        "company_keywords": ["污水处理厂", "水务集团", "环保科技", "工业水处理"],
+        "uses": "发现污水厂、工业园和环保项目的含钙药剂需求",
+        "pitch": "核对使用工段、技术指标、年用量、供应商资质和配送频次",
+        "score": 68,
+    },
+    "desiccant": {
+        "name": "干燥剂原料采购",
+        "keywords": ["干燥剂氯化钙", "集装箱干燥剂原料", "吸湿剂采购"],
+        "company_keywords": ["干燥剂厂家", "集装箱干燥剂", "吸湿剂厂家"],
+        "uses": "发现干燥剂、吸湿剂和防潮产品的原料采购需求",
+        "pitch": "核对含量、白度、粒径、吸湿率、包装和代工要求",
+        "score": 66,
+    },
+    "industrial_chemicals": {
+        "name": "工业化学品采购",
+        "keywords": ["氯盐采购", "工业盐类采购", "化工原料框架采购"],
+        "company_keywords": ["化工集团", "矿业集团", "钢铁集团", "制造集团"],
+        "uses": "监控大型企业化工原料年度框架和集中采购项目",
+        "pitch": "关注供应商入库、账期、运输资质、年度预计量和价格联动条款",
+        "score": 62,
+    },
+    "upstream_disposal": {
+        "name": "副产液钙/废液处置",
+        "keywords": ["液体氯化钙处置", "副产氯化钙综合利用", "含钙废液处置", "副产盐酸综合利用"],
+        "company_keywords": ["稀土冶炼", "环氧氯丙烷", "飞灰资源化", "钨业公司"],
+        "uses": "发现副产液钙、含钙盐水和副产盐酸综合利用或处置项目",
+        "pitch": "核实物料属性、月产生量、浓度杂质、危废属性和装运条件",
+        "score": 72,
+    },
+}
+
+PROCUREMENT_NOTICE_TYPES: dict[str, str] = {
+    "purchase": "采购公告",
+    "tender": "招标公告",
+    "award": "中标/成交结果",
+}
+
+PROCUREMENT_DATE_WINDOWS: dict[str, tuple[str, int]] = {
+    "3d": ("近3天", 3),
+    "10d": ("近10天", 10),
+    "30d": ("近30天", 30),
+    "90d": ("近90天", 90),
+}
 
 
 POSITIVE_WORDS = [
@@ -324,6 +406,12 @@ class Lead:
     direction: str = "downstream"
     process_basis: str = ""
     confidence: str = ""
+    project_title: str = ""
+    notice_date: str = ""
+    contact_name: str = ""
+    agency: str = ""
+    deadline: str = ""
+    budget: str = ""
 
 
 def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -333,6 +421,80 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: Any, status: int =
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def normalize_phone(value: Any) -> str:
+    phone = re.sub(r"\D", "", str(value or ""))
+    if phone.startswith("86") and len(phone) == 13:
+        phone = phone[2:]
+    return phone
+
+
+def valid_login_phone(phone: str) -> bool:
+    if not re.fullmatch(r"1[3-9]\d{9}", phone):
+        return False
+    return phone in LOGIN_PHONES if LOGIN_PHONES else SMS_DEV_MODE
+
+
+def sms_configured() -> bool:
+    return all(
+        [
+            ALIYUN_SMS_ACCESS_KEY_ID,
+            ALIYUN_SMS_ACCESS_KEY_SECRET,
+            ALIYUN_SMS_SIGN_NAME,
+            ALIYUN_SMS_TEMPLATE_CODE,
+        ]
+    )
+
+
+def aliyun_percent_encode(value: Any) -> str:
+    return quote(str(value), safe="~")
+
+
+def send_aliyun_sms(phone: str, code: str) -> None:
+    params = {
+        "AccessKeyId": ALIYUN_SMS_ACCESS_KEY_ID,
+        "Action": "SendSms",
+        "Format": "JSON",
+        "PhoneNumbers": phone,
+        "RegionId": "cn-hangzhou",
+        "SignName": ALIYUN_SMS_SIGN_NAME,
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": uuid.uuid4().hex,
+        "SignatureVersion": "1.0",
+        "TemplateCode": ALIYUN_SMS_TEMPLATE_CODE,
+        "TemplateParam": json.dumps({"code": code}, ensure_ascii=False, separators=(",", ":")),
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "Version": "2017-05-25",
+    }
+    canonicalized = "&".join(
+        f"{aliyun_percent_encode(key)}={aliyun_percent_encode(params[key])}"
+        for key in sorted(params)
+    )
+    string_to_sign = f"GET&%2F&{aliyun_percent_encode(canonicalized)}"
+    digest = hmac.new(
+        f"{ALIYUN_SMS_ACCESS_KEY_SECRET}&".encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    params["Signature"] = base64.b64encode(digest).decode("ascii")
+    url = "https://dysmsapi.aliyuncs.com/?" + "&".join(
+        f"{aliyun_percent_encode(key)}={aliyun_percent_encode(params[key])}"
+        for key in sorted(params)
+    )
+    req = Request(url, headers={"User-Agent": "CalciumLeadFinder/1.0"})
+    with urlopen(req, timeout=15, context=DEFAULT_SSL_CONTEXT) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    if result.get("Code") != "OK":
+        raise RuntimeError(str(result.get("Message") or result.get("Code") or "短信发送失败"))
+
+
+def code_digest(phone: str, code: str) -> str:
+    return hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        f"{phone}:{code}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
@@ -358,17 +520,22 @@ def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
 
 
 def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
-    return UPSTREAM_SECTOR_LIBRARY if direction == "upstream" else SECTOR_LIBRARY
+    if direction == "upstream":
+        return UPSTREAM_SECTOR_LIBRARY
+    if direction == "procurement":
+        return PROCUREMENT_SECTOR_LIBRARY
+    return SECTOR_LIBRARY
 
 
 def selected_sectors(ids: list[str] | None, direction: str) -> dict[str, dict[str, Any]]:
     library = get_sector_library(direction)
     if not ids:
-        ids = (
-            ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"]
-            if direction == "upstream"
-            else ["snow", "desiccant", "water", "concrete", "trader"]
-        )
+        if direction == "upstream":
+            ids = ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"]
+        elif direction == "procurement":
+            ids = ["calcium_chloride", "liquid_calcium_chloride", "deicing", "upstream_disposal"]
+        else:
+            ids = ["snow", "desiccant", "water", "concrete", "trader"]
     return {sector_id: library[sector_id] for sector_id in ids if sector_id in library}
 
 
@@ -450,9 +617,14 @@ def amap_search(
             or "QPS" in str(data.get("info") or "")
         )
         if not rate_limited:
+            if str(data.get("status")) != "1":
+                info = str(data.get("info") or "UNKNOWN_ERROR")
+                if info == "USER_DAILY_QUERY_OVER_LIMIT":
+                    raise RuntimeError("高德 API 今日调用额度已用完，请明日重试或更换 Key")
+                raise RuntimeError(f"高德 API 返回错误：{info}")
             return data
         time.sleep((0.65 * (2**attempt)) + random.uniform(0.1, 0.55))
-    return data
+    raise RuntimeError(f"高德 API 请求频率受限：{data.get('info') or '请稍后重试'}")
 
 
 def build_search_links(company_type: str, region: str, keyword: str) -> dict[str, str]:
@@ -476,6 +648,148 @@ def first_text(value: Any) -> str:
     if isinstance(value, list):
         return str(next((item for item in value if item), "")).strip()
     return str(value or "").strip()
+
+
+class TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        value = re.sub(r"\s+", " ", data).strip()
+        if value:
+            self.parts.append(value)
+
+
+class LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str]] = []
+        self.current_href = ""
+        self.current_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        self.current_href = next((value or "" for key, value in attrs if key.lower() == "href"), "")
+        self.current_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self.current_href:
+            value = re.sub(r"\s+", " ", data).strip()
+            if value:
+                self.current_parts.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self.current_href:
+            self.links.append(
+                {
+                    "href": self.current_href.strip(),
+                    "text": " ".join(self.current_parts).strip(),
+                }
+            )
+            self.current_href = ""
+            self.current_parts = []
+
+
+def html_text(value: str) -> str:
+    parser = TextExtractor()
+    parser.feed(html.unescape(value))
+    return " ".join(parser.parts)
+
+
+def html_links(value: str) -> list[dict[str, str]]:
+    parser = LinkExtractor()
+    parser.feed(html.unescape(value))
+    return parser.links
+
+
+def normalize_website(value: str) -> str:
+    website = value.strip()
+    if not website:
+        return ""
+    if not website.startswith(("http://", "https://")):
+        website = f"https://{website}"
+    parsed = urlparse(website)
+    return website if parsed.hostname else ""
+
+
+def same_website(url: str, website: str) -> bool:
+    target_host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    website_host = (urlparse(website).hostname or "").lower().removeprefix("www.")
+    return bool(target_host and website_host and (target_host == website_host or target_host.endswith(f".{website_host}")))
+
+
+def notice_date_from_text(value: str) -> str:
+    match = re.search(r"(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})", value)
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def fetch_json(url: str, data: dict[str, str], timeout: int = 15) -> dict[str, Any]:
+    body = urlencode(data).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": "https://www.ggzy.gov.cn/deal/dealList.html",
+        },
+    )
+    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_html(url: str, timeout: int = 15) -> str:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.ggzy.gov.cn/deal/dealList.html",
+        },
+    )
+    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def detail_value(page: str, code: str) -> str:
+    match = re.search(
+        rf'class="[^"]*\bcode-{re.escape(code)}\b[^"]*"[^>]*>(.*?)</samp>',
+        page,
+        re.S,
+    )
+    return html_text(match.group(1)) if match else ""
+
+
+def extract_procurement_detail(page: str) -> dict[str, str]:
+    text = html_text(page)
+    deadline_match = re.search(
+        r"(?:投标文件截止时间|响应文件提交截止时间)[:：]\s*(.+?)(?=（北京时间|投标地点|开标时间|$)",
+        text,
+    )
+    budget_match = re.search(r"预算金额（元）[:：]\s*([0-9,.]+)", text)
+    return {
+        "company": detail_value(page, "00014"),
+        "address": detail_value(page, "00018"),
+        "phone": detail_value(page, "00016"),
+        "agency": detail_value(page, "00009"),
+        "contact": detail_value(page, "00010"),
+        "deadline": deadline_match.group(1).strip() if deadline_match else "",
+        "budget": budget_match.group(1).strip() if budget_match else "",
+    }
+
+
+def company_from_notice_title(title: str) -> str:
+    candidates = re.split(
+        r"(?:20\d{2}年|关于|融雪剂|氯化钙|采购项目|公开招标|竞争性|询价)",
+        title,
+        maxsplit=1,
+    )
+    company = candidates[0].strip(" -—：:")
+    return company if len(company) >= 4 else "采购单位待核验"
 
 
 def fallback_leads(
@@ -665,30 +979,441 @@ def collect_amap_leads(
     return leads, errors
 
 
-def procurement_links(regions: list[str]) -> list[Lead]:
+def procurement_monitor_entries(
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    notice_type_ids: list[str],
+    date_window_id: str,
+) -> list[Lead]:
     leads: list[Lead] = []
-    for keyword in PROCUREMENT_KEYWORDS:
-        region_text = "、".join(regions[:4]) + ("等" if len(regions) > 4 else "")
-        leads.append(
-            Lead(
-                company=f"{keyword} 采购公告监控",
-                region=region_text,
-                sector="招投标/采购",
-                source="采购监控入口",
-                score=72 if "氯化钙" in keyword else 66,
-                use_case="发现公开采购需求、中标单位、历史成交价格",
-                pitch="优先联系采购单位、代理机构和历史中标供应商",
-                match_reason=f"每天检索关键词：{keyword}",
-                search_url=f"https://search.ccgp.gov.cn/bxsearch?searchtype=1&kw={quote(keyword)}",
-                website=f"https://www.baidu.com/s?wd={quote(keyword + ' 采购 招标 中标')}",
-                qcc_url=f"https://www.baidu.com/s?wd={quote(keyword + ' 中标 供应商 公司')}",
-            )
-        )
+    seen: set[tuple[str, str]] = set()
+    region_text = "、".join(regions[:6]) + ("等" if len(regions) > 6 else "")
+    date_label, days = PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])
+    end_date = date.today()
+    start_date = end_date - timedelta(days=days)
+    notice_types = [
+        (notice_type_id, PROCUREMENT_NOTICE_TYPES[notice_type_id])
+        for notice_type_id in notice_type_ids
+        if notice_type_id in PROCUREMENT_NOTICE_TYPES
+    ] or [("purchase", PROCUREMENT_NOTICE_TYPES["purchase"])]
+
+    for sector in sectors.values():
+        keywords = list(dict.fromkeys([*custom_keywords, *sector["keywords"]]))
+        for keyword in keywords:
+            for notice_type_id, notice_type in notice_types:
+                dedupe_key = (keyword, notice_type_id)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                query_text = f"{region_text} {keyword} {notice_type}".strip()
+                ccgp_query = urlencode(
+                    {
+                        "searchtype": "1",
+                        "page_index": "1",
+                        "bidSort": "0",
+                        "buyerName": "",
+                        "projectId": "",
+                        "pinMu": "0",
+                        "bidType": "0",
+                        "dbselect": "bidx",
+                        "kw": keyword,
+                        "start_time": start_date.strftime("%Y:%m:%d"),
+                        "end_time": end_date.strftime("%Y:%m:%d"),
+                        "timeType": "6",
+                    }
+                )
+                ggzy_query = urlencode(
+                    {
+                        "HEADER_DEAL_TYPE": "02",
+                        "DEAL_TIME": "06",
+                        "DEAL_CLASSIFY": "00",
+                        "DEAL_STAGE": "0000",
+                        "DEAL_PROVINCE": "0",
+                        "DEAL_CITY": "0",
+                        "DEAL_PLATFORM": "0",
+                        "BID_PLATFORM": "0",
+                        "DEAL_TRADE": "0",
+                        "isShowAll": "1",
+                        "PAGENUMBER": "1",
+                        "FINDTXT": keyword,
+                    }
+                )
+                score = int(sector["score"])
+                if notice_type_id == "award":
+                    score -= 6
+                leads.append(
+                    Lead(
+                        company=f"{keyword} · {notice_type}",
+                        region=region_text,
+                        sector=sector["name"],
+                        source="中国政府采购网 / 全国公共资源交易平台",
+                        score=max(score, 1),
+                        use_case=sector["uses"],
+                        pitch=sector["pitch"],
+                        match_reason=(
+                            f"{date_label}监控；关键词：{keyword}；公告类型：{notice_type}；"
+                            f"关注地区：{region_text}（进入平台后核验地区）"
+                        ),
+                        search_url=f"https://search.ccgp.gov.cn/bxsearch?{ccgp_query}",
+                        website=f"https://www.ggzy.gov.cn/deal/dealList.html?{ggzy_query}",
+                        qcc_url=f"https://www.baidu.com/s?wd={quote(query_text + ' 采购单位 中标供应商')}",
+                        direction="procurement",
+                        process_basis=f"监控周期：{start_date.isoformat()} 至 {end_date.isoformat()}",
+                        confidence="官方检索",
+                    )
+                )
     return leads
 
 
+def procurement_notice_kind(record: dict[str, Any]) -> str:
+    title = str(record.get("title") or "")
+    info_type = str(record.get("informationTypeText") or "")
+    if "中标" in title or "成交" in title or "中标" in info_type or "成交" in info_type:
+        return "award"
+    if "招标" in title or "招标" in info_type:
+        return "tender"
+    return "purchase"
+
+
+def collect_procurement_companies(
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    notice_type_ids: list[str],
+    date_window_id: str,
+    progress_callback: Any = None,
+) -> tuple[list[Lead], list[str], int]:
+    window_map = {"3d": "02", "10d": "03", "30d": "04", "90d": "05"}
+    keywords: list[tuple[str, dict[str, Any]]] = []
+    for sector in sectors.values():
+        sector_keywords = list(dict.fromkeys([*custom_keywords, *sector["keywords"]]))[:3]
+        keywords.extend((keyword, sector) for keyword in sector_keywords)
+
+    records_by_id: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
+    errors: list[str] = []
+    total_searches = len(keywords)
+    completed = 0
+    if progress_callback:
+        progress_callback(0, total_searches, 0, 0, "正在搜索全国公共资源交易平台")
+
+    def search_keyword(item: tuple[str, dict[str, Any]]) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        keyword, sector = item
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                data = fetch_json(
+                    "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList",
+                    {
+                        "SOURCE_TYPE": "1",
+                        "DEAL_TIME": window_map.get(date_window_id, "03"),
+                        "FINDTXT": keyword,
+                        "PAGENUMBER": "1",
+                    },
+                    timeout=20,
+                )
+                return keyword, sector, data
+            except Exception as exc:  # noqa: BLE001 - retry transient platform failures.
+                last_error = exc
+                time.sleep(0.5 * (attempt + 1))
+        raise last_error or RuntimeError("查询失败")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(search_keyword, item): item for item in keywords}
+        for future in as_completed(futures):
+            keyword, sector = futures[future]
+            try:
+                keyword, sector, data = future.result()
+            except Exception as exc:  # noqa: BLE001 - keep other keywords running.
+                errors.append(f"{keyword}：{exc}")
+                data = {}
+            if data.get("code") != 200:
+                if data:
+                    errors.append(f"{keyword}：平台返回 {data.get('message') or '查询失败'}")
+            for record in ((data.get("data") or {}).get("records") or []):
+                record_id = str(record.get("id") or "")
+                province = str(record.get("provinceText") or "")
+                if not record_id or not any(region.replace("省", "") in province.replace("省", "") for region in regions):
+                    continue
+                if notice_type_ids and procurement_notice_kind(record) not in notice_type_ids:
+                    continue
+                records_by_id.setdefault(record_id, (record, sector, keyword))
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    total_searches,
+                    len(records_by_id),
+                    0,
+                    f"正在搜索：{keyword}",
+                )
+
+    leads: list[Lead] = []
+    records = list(records_by_id.values())[:40]
+    detail_total = len(records)
+
+    def build_lead(item: tuple[dict[str, Any], dict[str, Any], str]) -> Lead:
+        record, sector, keyword = item
+        relative_url = str(record.get("url") or "")
+        detail_path = relative_url.replace("/html/a/", "/html/b/")
+        detail_url = f"https://www.ggzy.gov.cn{detail_path}"
+        detail: dict[str, str] = {}
+        try:
+            detail = extract_procurement_detail(fetch_html(detail_url))
+        except Exception:  # Detail availability varies by source platform.
+            detail = {}
+        title = str(record.get("title") or "")
+        company = detail.get("company") or company_from_notice_title(title)
+        notice_kind = procurement_notice_kind(record)
+        notice_label = PROCUREMENT_NOTICE_TYPES.get(notice_kind, str(record.get("informationTypeText") or "采购公告"))
+        score = int(sector["score"]) - (6 if notice_kind == "award" else 0)
+        links = build_search_links(company, str(record.get("provinceText") or ""), keyword)
+        deadline = detail.get("deadline") or ""
+        budget = detail.get("budget") or ""
+        follow_up = sector["pitch"]
+        if deadline:
+            follow_up = f"截止时间：{deadline}；{follow_up}"
+        return Lead(
+            company=company,
+            region=str(record.get("provinceText") or ""),
+            sector=notice_label,
+            source="全国公共资源交易平台",
+            score=max(score, 1),
+            phone=detail.get("phone") or "",
+            address=detail.get("address") or "",
+            website=f"https://www.ggzy.gov.cn{relative_url}",
+            use_case="公开招采项目，可核实采购数量、技术要求和报名条件",
+            pitch=follow_up,
+            match_reason=f"{record.get('publishTime') or '日期待核验'}；关键词：{keyword}",
+            search_url=detail_url,
+            raw_type=str(record.get("transactionSourcesPlatformText") or record.get("businessTypeText") or ""),
+            qcc_url=links["qcc"],
+            direction="procurement",
+            process_basis=f"公告发布日期：{record.get('publishTime') or '待核验'}",
+            confidence="官方公告",
+            project_title=title,
+            notice_date=str(record.get("publishTime") or ""),
+            contact_name=detail.get("contact") or "",
+            agency=detail.get("agency") or "",
+            deadline=deadline,
+            budget=budget,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(build_lead, item): item for item in records}
+        for index, future in enumerate(as_completed(futures), start=1):
+            try:
+                leads.append(future.result())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"公告详情解析失败：{exc}")
+            if progress_callback:
+                progress_callback(
+                    total_searches + index,
+                    total_searches + detail_total,
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    "正在读取采购单位和联系方式",
+                )
+    return leads, errors, total_searches + detail_total
+
+
+def collect_company_website_notices(
+    amap_key: str,
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    notice_type_ids: list[str],
+    date_window_id: str,
+    progress_callback: Any = None,
+) -> tuple[list[Lead], list[str], int]:
+    if not amap_key:
+        return [], ["企业官网采集需要配置高德 Web 服务 API Key。"], 0
+
+    company_jobs: list[tuple[str, dict[str, Any], str]] = []
+    for region in regions:
+        for sector in sectors.values():
+            for keyword in sector.get("company_keywords", [])[:2]:
+                company_jobs.append((region, sector, keyword))
+
+    candidates: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    completed = 0
+    total = len(company_jobs)
+    if progress_callback:
+        progress_callback(0, total, 0, 0, "正在查找目标公司及官网")
+
+    with ThreadPoolExecutor(max_workers=AMAP_WORKERS) as executor:
+        futures = {
+            executor.submit(amap_search, amap_key, region, keyword, 1): (region, sector, keyword)
+            for region, sector, keyword in company_jobs
+        }
+        for future in as_completed(futures):
+            region, sector, keyword = futures[future]
+            try:
+                data = future.result()
+                for poi in data.get("pois") or []:
+                    name = str(poi.get("name") or "").strip()
+                    website = normalize_website(first_text(poi.get("website")))
+                    if not name or not website:
+                        continue
+                    key = f"{name}|{website}"
+                    candidates.setdefault(
+                        key,
+                        {
+                            "company": name,
+                            "region": " ".join(
+                                part
+                                for part in [
+                                    as_text(poi.get("pname")),
+                                    as_text(poi.get("cityname")),
+                                    as_text(poi.get("adname")),
+                                ]
+                                if part
+                            ),
+                            "phone": as_text(poi.get("tel")).replace(";", " / "),
+                            "address": as_text(poi.get("address")),
+                            "website": website,
+                            "raw_type": as_text(poi.get("type")),
+                            "sector": sector,
+                            "company_keyword": keyword,
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep other company searches running.
+                errors.append(f"{region}/{keyword}：{exc}")
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total, len(candidates), 0, f"正在查找公司：{keyword}")
+
+    announcement_words = ["招标", "采购", "询价", "竞价", "比选", "供应商", "征集", "谈判"]
+    product_words = list(
+        dict.fromkeys(
+            [
+                *custom_keywords,
+                *[
+                    keyword
+                    for sector in sectors.values()
+                    for keyword in sector.get("keywords", [])
+                ],
+            ]
+        )
+    )
+    _, max_days = PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])
+    cutoff = date.today() - timedelta(days=max_days)
+    selected_notice_types = set(notice_type_ids) or {"purchase", "tender", "award"}
+
+    def website_notice_kind(value: str) -> str:
+        if any(word in value for word in ["中标", "成交", "候选人公示"]):
+            return "award"
+        if "招标" in value:
+            return "tender"
+        return "purchase"
+
+    def inspect_candidate(candidate: dict[str, Any]) -> list[Lead]:
+        website = candidate["website"]
+        homepage = fetch_html(website, timeout=12)
+        navigation_pages: list[str] = [website]
+        for link in html_links(homepage):
+            combined = f"{link['text']} {link['href']}".lower()
+            if not any(word in combined for word in announcement_words):
+                continue
+            url = urljoin(website, link["href"])
+            if same_website(url, website) and url not in navigation_pages:
+                navigation_pages.append(url)
+            if len(navigation_pages) >= 5:
+                break
+
+        found: list[Lead] = []
+        seen_urls: set[str] = set()
+        detail_checks = 0
+        for page_url in navigation_pages:
+            page = homepage if page_url == website else fetch_html(page_url, timeout=12)
+            for link in html_links(page):
+                title = link["text"].strip()
+                if len(title) < 6:
+                    continue
+                title_and_href = f"{title} {link['href']}"
+                if not any(word in title_and_href for word in announcement_words):
+                    continue
+                notice_url = urljoin(page_url, link["href"])
+                if not same_website(notice_url, website) or notice_url in seen_urls:
+                    continue
+                notice_kind = website_notice_kind(title_and_href)
+                if notice_kind not in selected_notice_types:
+                    continue
+                notice_text = title_and_href
+                if product_words and not any(word in notice_text for word in product_words):
+                    if detail_checks >= 12:
+                        continue
+                    detail_checks += 1
+                    try:
+                        notice_text = f"{notice_text} {html_text(fetch_html(notice_url, timeout=10))}"
+                    except Exception:  # noqa: BLE001 - skip inaccessible detail pages.
+                        continue
+                    if not any(word in notice_text for word in product_words):
+                        continue
+                notice_date = notice_date_from_text(notice_text)
+                if notice_date:
+                    try:
+                        if date.fromisoformat(notice_date) < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                seen_urls.add(notice_url)
+                sector = candidate["sector"]
+                links = build_search_links(candidate["company"], candidate["region"], title)
+                found.append(
+                    Lead(
+                        company=candidate["company"],
+                        region=candidate["region"],
+                        sector="企业官网采购公告",
+                        source="企业官网",
+                        score=min(100, int(sector["score"]) + 8),
+                        phone=candidate["phone"],
+                        address=candidate["address"],
+                        website=notice_url,
+                        use_case="企业官网公开的招标、采购、询价或供应商公告",
+                        pitch=sector["pitch"],
+                        match_reason=f"官网命中：{title}",
+                        search_url=notice_url,
+                        raw_type=candidate["raw_type"],
+                        qcc_url=links["qcc"],
+                        company_website=website,
+                        direction="procurement",
+                        process_basis=f"先定位目标公司，再检索官网采购栏目；公司线索：{candidate['company_keyword']}",
+                        confidence="官网公告",
+                        project_title=title,
+                        notice_date=notice_date,
+                    )
+                )
+                if len(found) >= 5:
+                    return found
+        return found
+
+    leads: list[Lead] = []
+    selected_candidates = list(candidates.values())[:30]
+    website_total = len(selected_candidates)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(inspect_candidate, item): item for item in selected_candidates}
+        for index, future in enumerate(as_completed(futures), start=1):
+            candidate = futures[future]
+            try:
+                leads.extend(future.result())
+            except Exception as exc:  # noqa: BLE001 - one inaccessible website should not stop the batch.
+                errors.append(f"{candidate['company']}官网：{exc}")
+            if progress_callback:
+                progress_callback(
+                    total + index,
+                    total + website_total,
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    f"正在检查官网：{candidate['company']}",
+                )
+    return leads, errors, total + website_total
+
+
 def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
-    direction = "upstream" if payload.get("direction") == "upstream" else "downstream"
+    requested_direction = str(payload.get("direction") or "")
+    direction = requested_direction if requested_direction in {"upstream", "procurement"} else "downstream"
     regions = normalize_regions(payload.get("regions"))
     sectors = selected_sectors(payload.get("sectors"), direction)
     custom_keywords = [
@@ -705,6 +1430,63 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     strict_upstream = bool(payload.get("strictUpstream", True))
 
     errors: list[str] = []
+    if direction == "procurement":
+        notice_type_ids = payload.get("noticeTypes") or ["purchase", "tender", "award"]
+        date_window_id = str(payload.get("dateWindow") or "10d")
+        procurement_sources = payload.get("procurementSources") or ["public_platform"]
+        leads: list[Lead] = []
+        errors = []
+        request_count = 0
+        if "public_platform" in procurement_sources:
+            platform_leads, platform_errors, platform_requests = collect_procurement_companies(
+                regions,
+                sectors,
+                custom_keywords,
+                notice_type_ids,
+                date_window_id,
+                progress_callback,
+            )
+            leads.extend(platform_leads)
+            errors.extend(platform_errors)
+            request_count += platform_requests
+        if "company_website" in procurement_sources:
+            website_leads, website_errors, website_requests = collect_company_website_notices(
+                amap_key,
+                regions,
+                sectors,
+                custom_keywords,
+                notice_type_ids,
+                date_window_id,
+                progress_callback,
+            )
+            leads.extend(website_leads)
+            errors.extend(website_errors)
+            request_count += website_requests
+        deduped: dict[str, Lead] = {}
+        for lead in leads:
+            key = f"{lead.company}|{lead.project_title}|{lead.website}"
+            deduped.setdefault(key, lead)
+        leads = list(deduped.values())
+        leads = sorted(leads, key=lambda item: item.score, reverse=True)
+        return {
+            "leads": [asdict(lead) for lead in leads],
+            "errors": errors[:40],
+            "meta": {
+                "count": len(leads),
+                "companyCount": len(leads),
+                "phoneCount": len([lead for lead in leads if lead.phone]),
+                "requestCount": request_count,
+                "workers": 4,
+                "fastMode": True,
+                "direction": direction,
+                "regions": regions,
+                "sectors": [item["name"] for item in sectors.values()],
+                "noticeTypes": [PROCUREMENT_NOTICE_TYPES[item] for item in notice_type_ids if item in PROCUREMENT_NOTICE_TYPES],
+                "procurementSources": procurement_sources,
+                "dateWindow": PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])[0],
+                "mode": "procurement",
+            },
+        }
     if require_amap and not amap_key:
         leads = []
         errors.append("要显示具体公司和电话，必须填写高德 Web 服务 API Key；否则只能生成开发任务清单。")
@@ -726,9 +1508,6 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             errors.append("未采集到高德结果，已生成搜索任务清单。")
     else:
         leads = fallback_leads(regions, sectors, custom_keywords, direction)
-
-    if payload.get("includeProcurement", True) and not require_amap and direction == "downstream":
-        leads.extend(procurement_links(regions))
 
     leads = sorted(leads, key=lambda item: item.score, reverse=True)
     return {
@@ -859,6 +1638,12 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
         "direction",
         "process_basis",
         "confidence",
+        "project_title",
+        "notice_date",
+        "contact_name",
+        "agency",
+        "deadline",
+        "budget",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
@@ -868,6 +1653,18 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
 
 
 class AppHandler(SimpleHTTPRequestHandler):
+    def end_headers(self) -> None:
+        if urlparse(self.path).path in {
+            "/",
+            "/index.html",
+            "/app.js",
+            "/login",
+            "/login.html",
+            "/login.js",
+        }:
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def client_id(self) -> str:
         forwarded = self.headers.get("X-Forwarded-For", "")
         return forwarded.split(",", 1)[0].strip() or self.client_address[0]
@@ -922,7 +1719,36 @@ class AppHandler(SimpleHTTPRequestHandler):
         LOGIN_ATTEMPTS.setdefault(self.client_id(), []).append(time.time())
 
     def is_public_path(self, path: str) -> bool:
-        return path in {"/login", "/login.html", "/styles.css", "/login.js", "/api/login", "/health"}
+        return path in {
+            "/login",
+            "/login.html",
+            "/styles.css",
+            "/login.js",
+            "/api/login",
+            "/api/send-code",
+            "/health",
+        }
+
+    def sms_send_allowed(self, phone: str) -> tuple[bool, str]:
+        now = time.time()
+        client = self.client_id()
+        with SMS_LOCK:
+            attempts = [
+                stamp
+                for stamp in SMS_SEND_ATTEMPTS.get(client, [])
+                if now - stamp < LOGIN_WINDOW
+            ]
+            SMS_SEND_ATTEMPTS[client] = attempts
+            if len(attempts) >= SMS_SEND_LIMIT:
+                return False, "验证码发送过于频繁，请十分钟后再试"
+            existing = SMS_CODES.get(phone)
+            if existing and now - float(existing.get("sentAt", 0)) < SMS_SEND_COOLDOWN:
+                wait_seconds = max(
+                    1,
+                    int(SMS_SEND_COOLDOWN - (now - float(existing["sentAt"]))),
+                )
+                return False, f"请等待 {wait_seconds} 秒后重新发送"
+        return True, ""
 
     def translate_path(self, path: str) -> str:
         parsed = urlparse(path)
@@ -933,7 +1759,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok", "version": "progress-company-profile-v1"})
+            json_response(self, {"status": "ok", "version": "procurement-monitor-v1"})
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
@@ -947,7 +1773,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             if path.startswith("/api/"):
                 json_response(self, {"error": "请先登录"}, 401)
             else:
-                self.redirect("/login")
+                self.redirect("/login?v=sms-login-1")
             return
         if path == "/api/config":
             json_response(
@@ -956,6 +1782,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "sectors": SECTOR_LIBRARY,
                     "downstreamSectors": SECTOR_LIBRARY,
                     "upstreamSectors": UPSTREAM_SECTOR_LIBRARY,
+                    "procurementSectors": PROCUREMENT_SECTOR_LIBRARY,
+                    "procurementNoticeTypes": PROCUREMENT_NOTICE_TYPES,
+                    "procurementDateWindows": {
+                        key: value[0] for key, value in PROCUREMENT_DATE_WINDOWS.items()
+                    },
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
                 },
@@ -986,6 +1817,45 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         path = urlparse(self.path).path
+        if path == "/api/send-code":
+            if not APP_PASSWORD:
+                json_response(self, {"error": "服务器尚未配置 APP_PASSWORD"}, 503)
+                return
+            phone = normalize_phone(payload.get("phone"))
+            password = str(payload.get("password") or "")
+            if not valid_login_phone(phone) or not hmac.compare_digest(password, APP_PASSWORD):
+                self.record_login_failure()
+                json_response(self, {"error": "手机号或密码错误"}, 401)
+                return
+            allowed, reason = self.sms_send_allowed(phone)
+            if not allowed:
+                json_response(self, {"error": reason}, 429)
+                return
+            if not sms_configured() and not SMS_DEV_MODE:
+                json_response(self, {"error": "服务器尚未配置短信服务"}, 503)
+                return
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            try:
+                if sms_configured():
+                    send_aliyun_sms(phone, code)
+            except Exception as exc:  # noqa: BLE001
+                json_response(self, {"error": f"验证码发送失败：{exc}"}, 502)
+                return
+            now = time.time()
+            with SMS_LOCK:
+                SMS_CODES[phone] = {
+                    "digest": code_digest(phone, code),
+                    "expiresAt": now + SMS_CODE_TTL,
+                    "sentAt": now,
+                    "attempts": 0,
+                }
+                SMS_SEND_ATTEMPTS.setdefault(self.client_id(), []).append(now)
+            response: dict[str, Any] = {"ok": True, "expiresIn": SMS_CODE_TTL}
+            if SMS_DEV_MODE and not sms_configured():
+                response["devCode"] = code
+            json_response(self, response)
+            return
+
         if path == "/api/login":
             if not APP_PASSWORD:
                 json_response(self, {"error": "服务器尚未配置 APP_PASSWORD"}, 503)
@@ -993,10 +1863,33 @@ class AppHandler(SimpleHTTPRequestHandler):
             if not self.login_allowed():
                 json_response(self, {"error": "尝试次数过多，请十分钟后再试"}, 429)
                 return
+            phone = normalize_phone(payload.get("phone"))
             password = str(payload.get("password") or "")
-            if not hmac.compare_digest(password, APP_PASSWORD):
+            code = re.sub(r"\D", "", str(payload.get("code") or ""))
+            if not valid_login_phone(phone) or not hmac.compare_digest(password, APP_PASSWORD):
                 self.record_login_failure()
-                json_response(self, {"error": "密码错误"}, 401)
+                json_response(self, {"error": "手机号或密码错误"}, 401)
+                return
+            now = time.time()
+            with SMS_LOCK:
+                saved_code = SMS_CODES.get(phone)
+                if not saved_code or now > float(saved_code.get("expiresAt", 0)):
+                    SMS_CODES.pop(phone, None)
+                    saved_code = None
+                elif int(saved_code.get("attempts", 0)) >= 5:
+                    SMS_CODES.pop(phone, None)
+                    saved_code = None
+                elif not hmac.compare_digest(
+                    str(saved_code.get("digest") or ""),
+                    code_digest(phone, code),
+                ):
+                    saved_code["attempts"] = int(saved_code.get("attempts", 0)) + 1
+                    saved_code = None
+                else:
+                    SMS_CODES.pop(phone, None)
+            if not saved_code:
+                self.record_login_failure()
+                json_response(self, {"error": "验证码错误或已过期"}, 401)
                 return
             LOGIN_ATTEMPTS.pop(self.client_id(), None)
             body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
@@ -1076,6 +1969,10 @@ def main() -> None:
 
     if not APP_PASSWORD:
         print("WARNING: APP_PASSWORD is not set. Login will remain disabled.")
+    if not LOGIN_PHONES:
+        print("WARNING: LOGIN_PHONES is not set. Only SMS_DEV_MODE can allow local login.")
+    if not sms_configured() and not SMS_DEV_MODE:
+        print("WARNING: Aliyun SMS is not configured. Verification codes cannot be sent.")
     if not os.getenv("AMAP_KEY"):
         print("WARNING: AMAP_KEY is not set. Company collection will remain disabled.")
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)

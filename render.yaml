@@ -7,7 +7,17 @@ services:
     envVars:
       - key: APP_PASSWORD
         sync: false
+      - key: LOGIN_PHONES
+        sync: false
       - key: AMAP_KEY
+        sync: false
+      - key: ALIYUN_SMS_ACCESS_KEY_ID
+        sync: false
+      - key: ALIYUN_SMS_ACCESS_KEY_SECRET
+        sync: false
+      - key: ALIYUN_SMS_SIGN_NAME
+        sync: false
+      - key: ALIYUN_SMS_TEMPLATE_CODE
         sync: false
       - key: SESSION_SECRET
         generateValue: true
