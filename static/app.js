@@ -233,7 +233,7 @@ function setDirection(direction) {
   $("#direction-note").textContent = upstream
     ? "查找生产过程中可能形成液体氯化钙的企业；结果属于工艺线索，需要进一步核实。"
     : procurement
-      ? "自动聚合全国公共资源、中国政府采购网、中央政府采购网，也可检查企业官网。"
+      ? "自动聚合全国、中央及已接入的省级官方采购平台，也可检查企业官网。"
       : "查找可能采购氯化钙的下游企业。";
   $("#custom-keywords").placeholder = upstream
     ? "例如：副产盐酸, 石灰中和, 湿法冶炼, 飞灰水洗"
@@ -438,6 +438,8 @@ function applySearchResult(data) {
         ggzy: "全国公共资源",
         ccgp: "中国政府采购网",
         zycg: "中央政府采购网",
+        shandong: "山东省平台",
+        sichuan: "四川省平台",
         company_website: "企业官网",
       })[source] || source).join("、") || "官方平台"}。`
       : data.meta?.mode === "need_key"
