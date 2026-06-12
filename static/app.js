@@ -233,7 +233,7 @@ function setDirection(direction) {
   $("#direction-note").textContent = upstream
     ? "查找生产过程中可能形成液体氯化钙的企业；结果属于工艺线索，需要进一步核实。"
     : procurement
-      ? "可直接采集公共资源平台公告，也可先找公司再检索企业官网采购公告。"
+      ? "自动聚合全国公共资源、中国政府采购网、中央政府采购网，也可检查企业官网。"
       : "查找可能采购氯化钙的下游企业。";
   $("#custom-keywords").placeholder = upstream
     ? "例如：副产盐酸, 石灰中和, 湿法冶炼, 飞灰水洗"
@@ -317,8 +317,8 @@ async function runSearch(mode = "amap") {
   setNotice(
     state.direction === "procurement"
       ? payload.procurementSources.includes("company_website")
-        ? "正在查找目标公司，并检查企业官网采购栏目。"
-        : "正在采集公共资源平台的采购单位和公告详情。"
+        ? "正在聚合官方公告，并检查目标企业官网采购栏目。"
+        : "正在聚合多个官方平台的采购单位和公告详情。"
       : mode === "amap"
         ? `正在采集具体公司（${scope}）。`
         : "正在生成开发任务。",
@@ -434,7 +434,12 @@ function applySearchResult(data) {
       ? `已发现 ${realCount} 家可能副产液体氯化钙的企业，其中 ${phoneCount} 家有电话；请按相关度核实工艺。`
       : `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
     : data.meta?.mode === "procurement"
-      ? `已采集 ${state.leads.length} 条招采公告，其中 ${phoneCount} 条含采购单位电话；来源：${(data.meta?.procurementSources || []).map((source) => source === "company_website" ? "企业官网" : "公共资源平台").join("、") || "公共资源平台"}。`
+      ? `已采集 ${state.leads.length} 条招采公告，其中 ${phoneCount} 条含采购单位电话；来源：${(data.meta?.procurementSources || []).map((source) => ({
+        ggzy: "全国公共资源",
+        ccgp: "中国政府采购网",
+        zycg: "中央政府采购网",
+        company_website: "企业官网",
+      })[source] || source).join("、") || "官方平台"}。`
       : data.meta?.mode === "need_key"
       ? "未开始采集。"
       : `已生成 ${state.leads.length} 条开发任务。`;
@@ -486,7 +491,7 @@ function showCompanyDetail(lead) {
     lead.search_url ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${procurement ? (companyWebsiteNotice ? "官网公告" : "公告正文") : "高德地图"}</a>` : "",
     companyWebsiteNotice && lead.company_website ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>` : "",
     lead.qcc_url ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">工商信息核验</a>` : "",
-    lead.website && lead.website !== lead.search_url ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${procurement ? "公共资源交易平台" : "网页搜索"}</a>` : "",
+    lead.website && lead.website !== lead.search_url ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${procurement ? "公告页面" : "网页搜索"}</a>` : "",
   ].join("");
   $("#company-dialog").showModal();
 }

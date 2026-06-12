@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=pnvs-login-1" />
+    <link rel="stylesheet" href="/styles.css?v=official-platforms-1" />
   </head>
   <body>
     <div class="app">
@@ -93,8 +93,16 @@
               <div class="section-title">采集来源</div>
               <div class="notice-type-grid">
                 <label>
-                  <input type="checkbox" name="procurementSource" value="public_platform" checked />
-                  公共资源平台
+                  <input type="checkbox" name="procurementSource" value="ggzy" checked />
+                  全国公共资源
+                </label>
+                <label>
+                  <input type="checkbox" name="procurementSource" value="ccgp" checked />
+                  中国政府采购网
+                </label>
+                <label>
+                  <input type="checkbox" name="procurementSource" value="zycg" checked />
+                  中央政府采购网
                 </label>
                 <label>
                   <input type="checkbox" name="procurementSource" value="company_website" />
@@ -102,7 +110,7 @@
                 </label>
               </div>
               <div class="direction-note">
-                企业官网模式会先定位符合条件的公司，再检查其官网采购、招标、询价和供应商公告。
+                官方平台会自动采集真实公告；企业官网模式会先定位公司，再检查其采购栏目。
               </div>
               <div class="section-title">公告类型</div>
               <div class="notice-type-grid">
@@ -232,6 +240,6 @@
       <div id="detail-actions" class="dialog-actions"></div>
     </dialog>
 
-    <script src="/app.js?v=pnvs-login-1"></script>
+    <script src="/app.js?v=official-platforms-1"></script>
   </body>
 </html>

@@ -818,6 +818,83 @@ def extract_procurement_detail(page: str) -> dict[str, str]:
     }
 
 
+def html_table_value(page: str, label: str) -> str:
+    match = re.search(
+        rf"<td[^>]*class=['\"]title['\"][^>]*>\s*{re.escape(label)}\s*</td>"
+        rf"\s*<td[^>]*>(.*?)</td>",
+        page,
+        re.S | re.I,
+    )
+    return html_text(match.group(1)) if match else ""
+
+
+def first_public_phone(value: str) -> str:
+    match = re.search(
+        r"(?:\+?86[- ]?)?(?:0\d{2,3}[- ]?)?\d{7,8}(?:-\d{1,6})?|1[3-9]\d{9}",
+        value,
+    )
+    return match.group(0).strip() if match else value.strip()
+
+
+def extract_official_notice_detail(page: str) -> dict[str, str]:
+    text = html_text(page)
+
+    def text_value(patterns: list[str]) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, text, re.S)
+            if match:
+                return re.sub(r"\s+", " ", match.group(1)).strip(" ：:;；")
+        return ""
+
+    phone = html_table_value(page, "采购单位联系方式") or text_value(
+        [r"采购人信息.*?联系方式[:：]\s*([0-9\-（）()转 ]{7,30})"]
+    )
+    return {
+        "company": html_table_value(page, "采购单位")
+        or text_value(
+            [
+                r"[1１][.．、]?\s*采购人信息.*?名\s*称[:：]\s*(.+?)(?=地\s*址[:：])",
+            ]
+        ),
+        "address": html_table_value(page, "采购单位地址")
+        or text_value([r"采购人信息.*?地\s*址[:：]\s*(.+?)(?=联系方式[:：])"]),
+        "phone": first_public_phone(phone),
+        "agency": html_table_value(page, "代理机构名称")
+        or text_value(
+            [
+                r"[2２][.．、]?\s*采购(?:代理机构|执行机构)信息.*?名\s*称[:：]\s*(.+?)(?=地\s*址[:：])",
+            ]
+        ),
+        "contact": html_table_value(page, "项目联系人")
+        or text_value(
+            [
+                r"项目联系人[:：]\s*(.+?)(?=项目联系电话|电话[:：])",
+                r"文件联系人及电话[:：]\s*经办人[:：]?\s*(\S+)",
+            ]
+        ),
+        "deadline": html_table_value(page, "开标时间")
+        or text_value([r"(?:截止时间|提交投标文件截止时间)[:：]\s*(.+?)(?=（北京时间|投标地点|开标地点)"]),
+        "budget": html_table_value(page, "预算金额")
+        or text_value(
+            [
+                r"预算金额[:：]\s*([￥¥]?[0-9,.]+\s*(?:万元|元)?)",
+                r"中标[（(]成交[）)]金额[:：]\s*(?:人民币)?\s*([0-9,.]+\s*(?:万元|元)?)",
+            ]
+        ),
+    }
+
+
+def region_selected(region: str, regions: list[str]) -> bool:
+    if not region or not regions:
+        return True
+    normalized = region.replace("省", "").replace("市", "").replace("自治区", "")
+    return any(
+        item in {"全国", "中央"}
+        or item.replace("省", "").replace("市", "").replace("自治区", "") in normalized
+        for item in regions
+    )
+
+
 def company_from_notice_title(title: str) -> str:
     candidates = re.split(
         r"(?:20\d{2}年|关于|融雪剂|氯化钙|采购项目|公开招标|竞争性|询价)",
@@ -1253,6 +1330,355 @@ def collect_procurement_companies(
     return leads, errors, total_searches + detail_total
 
 
+CCGP_NOTICE_CHANNELS: dict[str, list[tuple[str, str]]] = {
+    "purchase": [
+        ("dfgg/jzxcs", "竞争性磋商公告"),
+        ("dfgg/xjgg", "询价公告"),
+        ("zygg/jzxcs", "中央竞争性磋商公告"),
+        ("zygg/xjgg", "中央询价公告"),
+    ],
+    "tender": [
+        ("dfgg/gkzb", "地方公开招标公告"),
+        ("zygg/gkzb", "中央公开招标公告"),
+    ],
+    "award": [
+        ("dfgg/zbgg", "地方中标公告"),
+        ("dfgg/cjgg", "地方成交公告"),
+        ("zygg/zbgg", "中央中标公告"),
+        ("zygg/cjgg", "中央成交公告"),
+    ],
+}
+
+
+def ccgp_list_url(channel: str, page: int) -> str:
+    suffix = "" if page == 0 else f"index_{page}.htm"
+    return f"https://www.ccgp.gov.cn/cggg/{channel}/{suffix}"
+
+
+def parse_ccgp_list(page: str, base_url: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r"<li>\s*<a\s+href=['\"]([^'\"]+)['\"][^>]*title=['\"]([^'\"]+)['\"][^>]*>.*?</a>"
+        r"\s*发布时间：<em>(.*?)</em>\s*地域：<em>(.*?)</em>\s*采购人：<em>(.*?)</em>",
+        re.S | re.I,
+    )
+    return [
+        {
+            "url": urljoin(base_url, match.group(1).strip()),
+            "title": html.unescape(match.group(2).strip()),
+            "date": html_text(match.group(3)),
+            "region": html_text(match.group(4)),
+            "company": html_text(match.group(5)),
+        }
+        for match in pattern.finditer(page)
+    ]
+
+
+def collect_ccgp_notices(
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    notice_type_ids: list[str],
+    date_window_id: str,
+    progress_callback: Any = None,
+) -> tuple[list[Lead], list[str], int]:
+    product_keywords = list(
+        dict.fromkeys(
+            [
+                *custom_keywords,
+                *[
+                    keyword
+                    for sector in sectors.values()
+                    for keyword in sector.get("keywords", [])
+                ],
+            ]
+        )
+    )
+    channels = [
+        (kind, channel, label)
+        for kind in (notice_type_ids or list(CCGP_NOTICE_CHANNELS))
+        for channel, label in CCGP_NOTICE_CHANNELS.get(kind, [])
+    ]
+    page_limits = {"3d": 2, "10d": 4, "30d": 6, "90d": 8}
+    page_limit = page_limits.get(date_window_id, 4)
+    list_jobs = [
+        (kind, channel, label, page)
+        for kind, channel, label in channels
+        for page in range(page_limit)
+    ]
+    _, max_days = PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])
+    cutoff = date.today() - timedelta(days=max_days)
+    matches: dict[str, tuple[dict[str, str], str, dict[str, Any], str]] = {}
+    errors: list[str] = []
+    completed = 0
+    if progress_callback:
+        progress_callback(0, len(list_jobs), 0, 0, "正在扫描中国政府采购网公告")
+
+    def fetch_list(job: tuple[str, str, str, int]) -> tuple[tuple[str, str, str, int], str]:
+        _, channel, _, page_number = job
+        url = ccgp_list_url(channel, page_number)
+        return job, fetch_html(url, timeout=18)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fetch_list, job): job for job in list_jobs}
+        for future in as_completed(futures):
+            kind, channel, label, page_number = futures[future]
+            try:
+                job, page = future.result()
+                base_url = ccgp_list_url(job[1], job[3])
+                for record in parse_ccgp_list(page, base_url):
+                    try:
+                        notice_day = date.fromisoformat(record["date"][:10])
+                    except ValueError:
+                        notice_day = date.today()
+                    if notice_day < cutoff or not region_selected(record["region"], regions):
+                        continue
+                    keyword = next(
+                        (item for item in product_keywords if item and item in record["title"]),
+                        "",
+                    )
+                    if not keyword:
+                        continue
+                    sector = next(
+                        (
+                            item
+                            for item in sectors.values()
+                            if keyword in item.get("keywords", []) or keyword in custom_keywords
+                        ),
+                        next(iter(sectors.values())),
+                    )
+                    matches.setdefault(record["url"], (record, kind, sector, label))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"中国政府采购网/{label}/第{page_number + 1}页：{exc}")
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    len(list_jobs),
+                    len(matches),
+                    0,
+                    f"正在扫描中国政府采购网：{label}",
+                )
+
+    selected = list(matches.values())[:40]
+    leads: list[Lead] = []
+
+    def build_lead(item: tuple[dict[str, str], str, dict[str, Any], str]) -> Lead:
+        record, kind, sector, label = item
+        detail: dict[str, str] = {}
+        try:
+            detail = extract_official_notice_detail(fetch_html(record["url"], timeout=18))
+        except Exception:  # noqa: BLE001 - list data is still a valid official lead.
+            detail = {}
+        company = detail.get("company") or record["company"] or company_from_notice_title(record["title"])
+        score = int(sector["score"]) - (6 if kind == "award" else 0)
+        links = build_search_links(company, record["region"], record["title"])
+        deadline = detail.get("deadline") or ""
+        return Lead(
+            company=company,
+            region=record["region"],
+            sector=PROCUREMENT_NOTICE_TYPES.get(kind, label),
+            source="中国政府采购网",
+            score=max(score, 1),
+            phone=detail.get("phone") or "",
+            address=detail.get("address") or "",
+            website=record["url"],
+            use_case="财政部指定政府采购信息发布媒体的公开公告",
+            pitch=(f"截止时间：{deadline}；" if deadline else "") + sector["pitch"],
+            match_reason=f"{record['date']}；来源栏目：{label}",
+            search_url=record["url"],
+            raw_type=label,
+            qcc_url=links["qcc"],
+            direction="procurement",
+            process_basis="中国政府采购网官方公告栏目自动采集",
+            confidence="官方公告",
+            project_title=record["title"],
+            notice_date=record["date"],
+            contact_name=detail.get("contact") or "",
+            agency=detail.get("agency") or "",
+            deadline=deadline,
+            budget=detail.get("budget") or "",
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(build_lead, item): item for item in selected}
+        for index, future in enumerate(as_completed(futures), start=1):
+            try:
+                leads.append(future.result())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"中国政府采购网公告解析失败：{exc}")
+            if progress_callback:
+                progress_callback(
+                    len(list_jobs) + index,
+                    len(list_jobs) + len(selected),
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    "正在读取中国政府采购网公告详情",
+                )
+    return leads, errors, len(list_jobs) + len(selected)
+
+
+def fetch_zycg_records(page_number: int = 1) -> list[dict[str, Any]]:
+    landing_url = "https://www.zycg.gov.cn/freecms/site/zygjjgzfcgzx/cggg/index.html"
+    landing_request = Request(landing_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(landing_request, timeout=18, context=DEFAULT_SSL_CONTEXT) as response:
+        cookies = response.headers.get_all("Set-Cookie") or []
+        response.read()
+    cookie_header = "; ".join(cookie.split(";", 1)[0] for cookie in cookies)
+    query = urlencode(
+        {
+            "siteId": "6f5243ee-d4d9-4b69-abbd-1e40576ccd7d",
+            "channel": "d0e7c5f4-b93e-4478-b7fe-61110bb47fd5",
+            "currPage": str(page_number),
+            "pageSize": "15",
+            "title": "",
+            "implementWay": "1",
+            "noticeType": "1,2,3,31,32,52,57,61",
+        }
+    )
+    request = Request(
+        f"https://www.zycg.gov.cn/freecms/rest/v1/notice/selectInfoMore.do?{query}",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": landing_url,
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Cookie": cookie_header,
+        },
+    )
+    with urlopen(request, timeout=18, context=DEFAULT_SSL_CONTEXT) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if str(payload.get("code")) != "200":
+        raise RuntimeError(str(payload.get("msg") or "公告列表查询失败"))
+    return payload.get("data") or []
+
+
+def collect_zycg_notices(
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    notice_type_ids: list[str],
+    date_window_id: str,
+    progress_callback: Any = None,
+) -> tuple[list[Lead], list[str], int]:
+    keyword_items: list[tuple[str, dict[str, Any]]] = [
+        (keyword, sector)
+        for sector in sectors.values()
+        for keyword in list(dict.fromkeys([*custom_keywords, *sector.get("keywords", [])]))
+    ]
+    _, max_days = PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])
+    cutoff = date.today() - timedelta(days=max_days)
+    records: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {}
+    errors: list[str] = []
+    page_limits = {"3d": 8, "10d": 14, "30d": 20, "90d": 24}
+    page_limit = page_limits.get(date_window_id, 14)
+    if progress_callback:
+        progress_callback(0, page_limit, 0, 0, "正在查询中央政府采购网")
+
+    pages_read = 0
+    for page_number in range(1, page_limit + 1):
+        try:
+            page_records = fetch_zycg_records(page_number)
+            pages_read += 1
+            stop_after_page = False
+            for record in page_records:
+                title = str(record.get("title") or "")
+                notice_date = str(record.get("addtimeStr") or "")
+                try:
+                    notice_day = date.fromisoformat(notice_date[:10])
+                    if notice_day < cutoff:
+                        stop_after_page = True
+                        continue
+                except ValueError:
+                    pass
+                keyword_sector = next(
+                    (
+                        (keyword, sector)
+                        for keyword, sector in keyword_items
+                        if keyword and keyword in title
+                    ),
+                    None,
+                )
+                if not keyword_sector:
+                    continue
+                kind = website_notice_kind_from_title(title)
+                if notice_type_ids and kind not in notice_type_ids:
+                    continue
+                url = urljoin("https://www.zycg.gov.cn", str(record.get("pageurl") or ""))
+                if url:
+                    keyword, sector = keyword_sector
+                    records.setdefault(url, (record, keyword, sector))
+            if progress_callback:
+                progress_callback(
+                    page_number,
+                    page_limit,
+                    len(records),
+                    0,
+                    f"正在查询中央政府采购网：第{page_number}页",
+                )
+            if stop_after_page or not page_records:
+                break
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"中央政府采购网/第{page_number}页：{exc}")
+            break
+
+    leads: list[Lead] = []
+    selected = list(records.items())[:30]
+
+    def build_lead(item: tuple[str, tuple[dict[str, Any], str, dict[str, Any]]]) -> Lead:
+        url, (record, keyword, sector) = item
+        detail: dict[str, str] = {}
+        try:
+            detail = extract_official_notice_detail(fetch_html(url, timeout=18))
+        except Exception:  # noqa: BLE001
+            detail = {}
+        title = str(record.get("title") or "")
+        kind = website_notice_kind_from_title(title)
+        company = detail.get("company") or company_from_notice_title(title)
+        score = int(sector["score"]) - (6 if kind == "award" else 0)
+        links = build_search_links(company, "中央", keyword)
+        return Lead(
+            company=company,
+            region="中央",
+            sector=PROCUREMENT_NOTICE_TYPES.get(kind, "采购公告"),
+            source="中央政府采购网",
+            score=max(score, 1),
+            phone=detail.get("phone") or "",
+            address=detail.get("address") or "",
+            website=url,
+            use_case="中央国家机关政府采购中心公开项目",
+            pitch=sector["pitch"],
+            match_reason=f"{record.get('addtimeStr') or '日期待核验'}；关键词：{keyword}",
+            search_url=url,
+            raw_type="中央政府采购",
+            qcc_url=links["qcc"],
+            direction="procurement",
+            process_basis="中央政府采购网官方查询接口",
+            confidence="官方公告",
+            project_title=title,
+            notice_date=str(record.get("addtimeStr") or ""),
+            contact_name=detail.get("contact") or "",
+            agency=detail.get("agency") or "",
+            deadline=detail.get("deadline") or "",
+            budget=detail.get("budget") or "",
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(build_lead, item): item for item in selected}
+        for future in as_completed(futures):
+            try:
+                leads.append(future.result())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"中央政府采购网公告解析失败：{exc}")
+    return leads, errors, pages_read + len(selected)
+
+
+def website_notice_kind_from_title(value: str) -> str:
+    if any(word in value for word in ["中标", "成交", "候选人公示"]):
+        return "award"
+    if "招标" in value:
+        return "tender"
+    return "purchase"
+
+
 def collect_company_website_notices(
     amap_key: str,
     regions: list[str],
@@ -1469,11 +1895,22 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     if direction == "procurement":
         notice_type_ids = payload.get("noticeTypes") or ["purchase", "tender", "award"]
         date_window_id = str(payload.get("dateWindow") or "10d")
-        procurement_sources = payload.get("procurementSources") or ["public_platform"]
+        procurement_sources = payload.get("procurementSources") or ["ggzy", "ccgp", "zycg"]
+        if "public_platform" in procurement_sources:
+            procurement_sources = list(
+                dict.fromkeys(
+                    [
+                        *[source for source in procurement_sources if source != "public_platform"],
+                        "ggzy",
+                        "ccgp",
+                        "zycg",
+                    ]
+                )
+            )
         leads: list[Lead] = []
         errors = []
         request_count = 0
-        if "public_platform" in procurement_sources:
+        if "ggzy" in procurement_sources:
             platform_leads, platform_errors, platform_requests = collect_procurement_companies(
                 regions,
                 sectors,
@@ -1485,6 +1922,29 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             leads.extend(platform_leads)
             errors.extend(platform_errors)
             request_count += platform_requests
+        if "ccgp" in procurement_sources:
+            ccgp_leads, ccgp_errors, ccgp_requests = collect_ccgp_notices(
+                regions,
+                sectors,
+                custom_keywords,
+                notice_type_ids,
+                date_window_id,
+                progress_callback,
+            )
+            leads.extend(ccgp_leads)
+            errors.extend(ccgp_errors)
+            request_count += ccgp_requests
+        if "zycg" in procurement_sources:
+            zycg_leads, zycg_errors, zycg_requests = collect_zycg_notices(
+                sectors,
+                custom_keywords,
+                notice_type_ids,
+                date_window_id,
+                progress_callback,
+            )
+            leads.extend(zycg_leads)
+            errors.extend(zycg_errors)
+            request_count += zycg_requests
         if "company_website" in procurement_sources:
             website_leads, website_errors, website_requests = collect_company_website_notices(
                 amap_key,
@@ -1500,7 +1960,13 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             request_count += website_requests
         deduped: dict[str, Lead] = {}
         for lead in leads:
-            key = f"{lead.company}|{lead.project_title}|{lead.website}"
+            normalized_title = re.sub(r"[\s\-—_（）()【】\[\]：:]+", "", lead.project_title)
+            normalized_company = re.sub(r"\s+", "", lead.company)
+            key = (
+                f"{normalized_company}|{normalized_title}"
+                if normalized_title
+                else f"{normalized_company}|{lead.website}"
+            )
             deduped.setdefault(key, lead)
         leads = list(deduped.values())
         leads = sorted(leads, key=lambda item: item.score, reverse=True)
@@ -1795,7 +2261,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok", "version": "pnvs-login-v1"})
+            json_response(self, {"status": "ok", "version": "multi-official-procurement-v1"})
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
