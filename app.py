@@ -103,6 +103,7 @@ DIRECTION_LABELS = {
     "competitor": "竞品/同行情报",
 }
 DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor"]
+DIRECTION_SET = set(DIRECTION_ORDER)
 
 
 COMPETITOR_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
@@ -1105,6 +1106,117 @@ def merged_lead_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> d
         if value not in ("", None, [], {}):
             merged[key] = value
     return merged
+
+
+def clipped_text(payload: dict[str, Any], key: str, limit: int) -> str:
+    return str(payload.get(key) or "").strip()[:limit]
+
+
+def create_manual_lead(payload: dict[str, Any]) -> dict[str, Any]:
+    company = clipped_text(payload, "company", 160)
+    if not company:
+        raise ValueError("请填写公司名称")
+    status = str(payload.get("salesStatus") or "new")
+    if status not in SALES_STATUSES:
+        raise ValueError("销售状态无效")
+
+    direction = str(payload.get("direction") or "downstream")
+    if direction not in DIRECTION_SET:
+        direction = "downstream"
+    opportunity_role = clipped_text(payload, "opportunityRole", 20)
+    if not opportunity_role:
+        opportunity_role = (
+            "supplier"
+            if direction == "upstream"
+            else "buyer"
+            if direction in {"downstream", "procurement"}
+            else "prospect"
+        )
+
+    website = clipped_text(payload, "website", 300)
+    company_website = clipped_text(payload, "companyWebsite", 300) or website
+    lead = {
+        "company": company,
+        "direction": direction,
+        "region": clipped_text(payload, "region", 120),
+        "sector": clipped_text(payload, "sector", 120),
+        "phone": clipped_text(payload, "phone", 200),
+        "email": clipped_text(payload, "email", 160),
+        "address": clipped_text(payload, "address", 240),
+        "website": website,
+        "company_website": company_website,
+        "source": "手动新增档案",
+        "match_reason": clipped_text(payload, "matchReason", 500) or "手动新增公司档案",
+        "use_case": clipped_text(payload, "useCase", 500),
+        "pitch": clipped_text(payload, "pitch", 500) or "根据销售记录继续跟进",
+        "raw_type": "手动维护",
+        "confidence": "人工确认",
+        "opportunity_role": opportunity_role,
+        "liquid_concentration": clipped_text(payload, "liquidConcentration", 80),
+        "monthly_volume": clipped_text(payload, "monthlyVolume", 80),
+        "impurity_profile": clipped_text(payload, "impurityProfile", 500),
+        "logistics_radius": clipped_text(payload, "logisticsRadius", 80),
+        "storage_condition": clipped_text(payload, "storageCondition", 300),
+        "commercial_value": clipped_text(payload, "commercialValue", 80),
+    }
+    persistence = save_leads([lead])
+    key = lead_dedupe_key(lead)
+    timestamp = now_iso()
+    owner = clipped_text(payload, "owner", 80)
+    notes = clipped_text(payload, "notes", 5000)
+    next_follow_up = clipped_text(payload, "nextFollowUp", 40)
+
+    with DATABASE_LOCK, database_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, payload, owner, notes, next_follow_up
+            FROM leads WHERE dedupe_key = ?
+            """,
+            (key,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("档案保存失败")
+        merged_payload = merged_lead_payload(json.loads(row["payload"] or "{}"), lead)
+        score, score_details = calculate_lead_score(merged_payload)
+        connection.execute(
+            """
+            UPDATE leads SET sales_status = ?, owner = ?, notes = ?,
+                next_follow_up = ?, is_new = 0, updated_at = ?,
+                opportunity_role = ?, liquid_concentration = ?,
+                monthly_volume = ?, impurity_profile = ?,
+                logistics_radius = ?, storage_condition = ?,
+                commercial_value = ?, score = ?, score_details = ?, payload = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                owner or row["owner"],
+                notes or row["notes"],
+                next_follow_up or row["next_follow_up"],
+                timestamp,
+                opportunity_role,
+                merged_payload.get("liquid_concentration", ""),
+                merged_payload.get("monthly_volume", ""),
+                merged_payload.get("impurity_profile", ""),
+                merged_payload.get("logistics_radius", ""),
+                merged_payload.get("storage_condition", ""),
+                merged_payload.get("commercial_value", ""),
+                score,
+                json.dumps(score_details, ensure_ascii=False),
+                json.dumps(merged_payload, ensure_ascii=False),
+                row["id"],
+            ),
+        )
+        lead_id = int(row["id"])
+
+    log_activity(
+        "create",
+        "lead",
+        f"手动新增公司档案：{company}",
+        lead_id,
+        {"status": status, "direction": direction, "owner": owner},
+    )
+    return {"lead": get_saved_lead(lead_id), "persistence": persistence}
 
 
 def save_leads(
@@ -5608,6 +5720,16 @@ class AppHandler(SimpleHTTPRequestHandler):
                 details={"meta": result.get("meta", {})},
             )
             json_response(self, result)
+            return
+
+        if path == "/api/leads/create":
+            try:
+                result = create_manual_lead(payload)
+            except ValueError as exc:
+                json_response(self, {"error": str(exc)}, 400)
+                return
+            create_follow_up_notifications()
+            json_response(self, result, 201)
             return
 
         if path == "/api/leads/update":

@@ -124,6 +124,42 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(lead["company"], "测试新线索有限公司")
         self.assertEqual(lead["phone"], "0531-12345678")
 
+    def test_manual_profile_create_is_deduplicated_and_keeps_sales_fields(self):
+        first = app.create_manual_lead(
+            {
+                "company": "手动档案化工有限公司",
+                "direction": "upstream",
+                "salesStatus": "qualified",
+                "owner": "张三",
+                "phone": "0532-88888888",
+                "region": "山东 青岛",
+                "sector": "环氧氯丙烷",
+                "liquidConcentration": "32%",
+                "monthlyVolume": "500吨/月",
+                "notes": "已确认副产液钙，等待报价。",
+            }
+        )
+        second = app.create_manual_lead(
+            {
+                "company": "手动档案化工有限公司",
+                "direction": "upstream",
+                "salesStatus": "quoted",
+                "owner": "李四",
+                "commercialValue": "80万元/年",
+            }
+        )
+
+        self.assertEqual(first["persistence"]["created"], 1)
+        self.assertEqual(second["persistence"]["updated"], 1)
+        leads = app.list_saved_leads({"limit": "100"})
+
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["sales_status"], "quoted")
+        self.assertEqual(leads[0]["owner"], "李四")
+        self.assertEqual(leads[0]["phone"], "0532-88888888")
+        self.assertEqual(leads[0]["liquid_concentration"], "32%")
+        self.assertEqual(leads[0]["commercial_value"], "80万元/年")
+
     @patch("app.fetch_html")
     def test_competitor_intelligence_builds_reverse_profile(self, fetch_html):
         fetch_html.return_value = """

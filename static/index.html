@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=monitor-options-1" />
+    <link rel="stylesheet" href="/styles.css?v=profiles-1" />
   </head>
   <body>
     <div class="app">
@@ -232,6 +232,10 @@
             线索数据库
             <span id="database-count" class="tab-count">0</span>
           </button>
+          <button type="button" data-view="profiles">
+            公司档案
+            <span id="profile-count" class="tab-count">0</span>
+          </button>
           <button type="button" data-view="alerts">
             监控与提醒
             <span id="alert-count" class="tab-count">0</span>
@@ -368,6 +372,18 @@
           </div>
         </section>
 
+        <section id="profiles-panel" class="profiles-panel" hidden>
+          <div class="profiles-toolbar">
+            <div>
+              <h3>公司档案</h3>
+              <p>集中管理已跟进公司、销售状态、联系方式、液钙参数和下一步动作。</p>
+            </div>
+            <button id="profile-create-button" class="primary" type="button">新增档案</button>
+          </div>
+          <div id="profile-status-board" class="profile-status-board"></div>
+          <div id="profile-list" class="profile-list"></div>
+        </section>
+
         <section id="system-panel" class="system-panel" hidden>
           <div class="alerts-toolbar">
             <div>
@@ -493,6 +509,121 @@
       <div id="detail-actions" class="dialog-actions"></div>
     </dialog>
 
+    <dialog id="profile-dialog" class="company-dialog profile-dialog">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">Manual profile</div>
+          <h3>新增公司档案</h3>
+        </div>
+        <button id="profile-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <form id="profile-form" class="profile-form">
+        <label class="field">
+          <span>公司名称</span>
+          <input id="profile-company" type="text" required placeholder="例如：山东某某化工有限公司" />
+        </label>
+        <label class="field">
+          <span>采集方向</span>
+          <select id="profile-direction">
+            <option value="downstream">下游买家</option>
+            <option value="upstream">上游液钙副产企业</option>
+            <option value="procurement">招投标/采购</option>
+            <option value="environmental">含氟废水企业</option>
+            <option value="competitor">竞品/同行情报</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>销售状态</span>
+          <select id="profile-sales-status">
+            <option value="new">待核实</option>
+            <option value="contacted">已联系</option>
+            <option value="qualified">有需求</option>
+            <option value="quoted">报价中</option>
+            <option value="won">已成交</option>
+            <option value="lost">无效</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>联系人/电话</span>
+          <input id="profile-phone" type="text" placeholder="手机号、座机、联系人" />
+        </label>
+        <label class="field">
+          <span>地区</span>
+          <input id="profile-region" type="text" placeholder="例如：山东 潍坊" />
+        </label>
+        <label class="field">
+          <span>行业/主题</span>
+          <input id="profile-sector" type="text" placeholder="例如：环氧氯丙烷、污水处理" />
+        </label>
+        <label class="field">
+          <span>负责人</span>
+          <input id="profile-owner" type="text" placeholder="销售姓名" />
+        </label>
+        <label class="field">
+          <span>下次跟进</span>
+          <input id="profile-next-follow-up" type="datetime-local" />
+        </label>
+        <label class="field">
+          <span>商机角色</span>
+          <select id="profile-opportunity-role">
+            <option value="">自动判断</option>
+            <option value="buyer">液钙买家</option>
+            <option value="supplier">液钙货源</option>
+            <option value="prospect">工艺候选</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>邮箱</span>
+          <input id="profile-email" type="email" placeholder="公开邮箱" />
+        </label>
+        <label class="field">
+          <span>企业官网</span>
+          <input id="profile-website" type="url" placeholder="https://example.com" />
+        </label>
+        <label class="field">
+          <span>地址</span>
+          <input id="profile-address" type="text" placeholder="工厂或办公地址" />
+        </label>
+        <label class="field">
+          <span>液钙浓度</span>
+          <input id="profile-liquid-concentration" type="text" placeholder="例如：30%-35%" />
+        </label>
+        <label class="field">
+          <span>月供/用量</span>
+          <input id="profile-monthly-volume" type="text" placeholder="例如：800 吨/月" />
+        </label>
+        <label class="field">
+          <span>运输半径</span>
+          <input id="profile-logistics-radius" type="text" placeholder="例如：300 公里" />
+        </label>
+        <label class="field">
+          <span>预估商业价值</span>
+          <input id="profile-commercial-value" type="text" placeholder="例如：120 万元/年" />
+        </label>
+        <label class="field profile-wide">
+          <span>用途/工艺</span>
+          <textarea id="profile-use-case" rows="2" placeholder="液钙采购用途、盐酸+石灰副产、含氟废水处理等"></textarea>
+        </label>
+        <label class="field profile-wide">
+          <span>匹配原因</span>
+          <textarea id="profile-match-reason" rows="2" placeholder="为什么值得跟进，证据来自哪里"></textarea>
+        </label>
+        <label class="field profile-wide">
+          <span>杂质与质量指标</span>
+          <textarea id="profile-impurity-profile" rows="2" placeholder="铁、镁、重金属、COD、有机氯、色度等"></textarea>
+        </label>
+        <label class="field profile-wide">
+          <span>储运条件</span>
+          <textarea id="profile-storage-condition" rows="2" placeholder="储罐、卸货泵、槽车限制、装卸时间等"></textarea>
+        </label>
+        <label class="field profile-wide">
+          <span>销售备注</span>
+          <textarea id="profile-notes" rows="3" placeholder="关键人、价格、需求强度、下一步动作"></textarea>
+        </label>
+        <button class="primary profile-wide" type="submit">保存档案</button>
+      </form>
+    </dialog>
+
     <dialog id="monitor-dialog" class="company-dialog monitor-dialog">
       <div class="dialog-head">
         <div>
@@ -547,6 +678,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=monitor-options-1"></script>
+    <script src="/app.js?v=profiles-1"></script>
   </body>
 </html>

@@ -12,6 +12,8 @@ const state = {
   activeJobId: "",
   view: "collect",
   savedLeads: [],
+  profiles: [],
+  profileFiltered: [],
   dashboard: {},
   monitors: [],
   notifications: [],
@@ -29,6 +31,17 @@ const DIRECTION_LABELS = {
 };
 
 const DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor"];
+
+const SALES_STATUS_LABELS = {
+  new: "待核实",
+  contacted: "已联系",
+  qualified: "有需求",
+  quoted: "报价中",
+  won: "已成交",
+  lost: "无效",
+};
+
+const SALES_STATUS_ORDER = ["new", "contacted", "qualified", "quoted", "won", "lost"];
 
 const REGION_LABELS = {
   north: "华北",
@@ -186,6 +199,20 @@ async function copyText(value) {
 }
 
 function renderMetrics(leads) {
+  if (state.view === "profiles") {
+    const source = state.profileFiltered.length || $("#filter")?.value || $("#status-filter")?.value || $("#direction-filter")?.value
+      ? state.profileFiltered
+      : state.profiles;
+    $("#metric-count").textContent = source.length;
+    $("#metric-hot").textContent = source.filter((lead) => ["qualified", "quoted"].includes(lead.sales_status)).length;
+    $("#metric-phone").textContent = source.filter((lead) => lead.next_follow_up).length;
+    $("#metric-count-label").textContent = "档案数量";
+    $("#metric-hot-label").textContent = "重点跟进";
+    $("#metric-phone-label").textContent = "已排跟进";
+    $("#metric-mode").textContent = source.filter((lead) => lead.sales_status === "won").length;
+    $("#metric-mode-label").textContent = "已成交";
+    return;
+  }
   if (state.view !== "collect") {
     $("#metric-count").textContent = state.dashboard.total || 0;
     $("#metric-hot").textContent = state.dashboard.highScore || 0;
@@ -379,6 +406,7 @@ async function fetchJson(url, options = {}) {
 async function loadDashboard() {
   state.dashboard = await fetchJson("/api/dashboard");
   $("#database-count").textContent = state.dashboard.total || 0;
+  $("#profile-count").textContent = state.dashboard.total || 0;
   $("#alert-count").textContent = state.dashboard.unreadNotifications || 0;
   $("#system-count").textContent = state.dashboard.unresolvedEvents || 0;
   if (state.view !== "collect") renderMetrics([]);
@@ -389,6 +417,145 @@ async function loadSavedLeads() {
   state.savedLeads = data.leads || [];
   $("#export-button").disabled = !state.savedLeads.length;
   renderLeads();
+}
+
+function renderProfileStatusBoard() {
+  const counts = SALES_STATUS_ORDER.reduce((acc, key) => {
+    acc[key] = state.profiles.filter((lead) => (lead.sales_status || "new") === key).length;
+    return acc;
+  }, {});
+  $("#profile-status-board").innerHTML = SALES_STATUS_ORDER.map((key) => `
+    <div class="profile-status-card">
+      <span>${counts[key] || 0}</span>
+      <p>${escapeHtml(SALES_STATUS_LABELS[key])}</p>
+    </div>
+  `).join("");
+}
+
+function renderProfiles() {
+  const query = $("#filter").value.trim();
+  const status = $("#status-filter")?.value || "";
+  const direction = $("#direction-filter")?.value || "";
+  state.profileFiltered = state.profiles.filter((lead) => {
+    if (status && lead.sales_status !== status) return false;
+    if (direction && lead.direction !== direction) return false;
+    return leadMatches(lead, query);
+  });
+  state.filtered = state.profileFiltered;
+  renderProfileStatusBoard();
+  renderMetrics(state.profileFiltered);
+
+  const list = $("#profile-list");
+  if (!state.profileFiltered.length) {
+    list.innerHTML = `<div class="empty-state">没有匹配的公司档案，可以点击右上角手动新增。</div>`;
+    return;
+  }
+  const roleLabels = {
+    buyer: "液钙买家",
+    supplier: "液钙货源",
+    prospect: "工艺候选",
+  };
+  list.innerHTML = state.profileFiltered.map((lead, index) => {
+    const statusKey = lead.sales_status || "new";
+    const phone = lead.phone
+      ? `<a href="${escapeHtml(telHref(splitPhones(lead.phone)[0] || lead.phone))}">${escapeHtml(lead.phone)}</a>`
+      : "待补充电话";
+    const followUp = lead.next_follow_up ? formatDateTime(lead.next_follow_up) : "未设置跟进";
+    const note = lead.notes || lead.match_reason || lead.use_case || "暂无备注";
+    const tags = [
+      DIRECTION_LABELS[lead.direction] || "未分类",
+      roleLabels[lead.opportunity_role] || lead.opportunity_role,
+      lead.liquid_concentration ? `浓度 ${lead.liquid_concentration}` : "",
+      lead.monthly_volume ? `月量 ${lead.monthly_volume}` : "",
+      lead.commercial_value ? `价值 ${lead.commercial_value}` : "",
+    ].filter(Boolean);
+    return `
+      <article class="profile-card">
+        <div>
+          <div class="profile-card-head">
+            <h4>${escapeHtml(lead.company)}</h4>
+            <span class="sales-status status-${escapeHtml(statusKey)}">${escapeHtml(SALES_STATUS_LABELS[statusKey] || lead.sales_status_label || "待核实")}</span>
+          </div>
+          <div class="profile-meta">
+            ${escapeHtml(lead.region || "地区待补充")} · ${escapeHtml(lead.sector || "行业待补充")} · ${phone}
+          </div>
+          <div class="profile-meta">
+            负责人：${escapeHtml(lead.owner || "未分配")} · 下次跟进：${escapeHtml(followUp)}
+          </div>
+          <div class="profile-note">${escapeHtml(note)}</div>
+          <div class="profile-tags">
+            ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
+          </div>
+        </div>
+        <div class="profile-actions">
+          <button class="secondary" type="button" data-profile-detail-index="${index}">查看/跟进</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderCurrentResults() {
+  if (state.view === "profiles") renderProfiles();
+  else renderLeads();
+}
+
+async function loadProfiles() {
+  const data = await fetchJson("/api/leads?limit=5000");
+  state.profiles = data.leads || [];
+  $("#profile-count").textContent = state.profiles.length;
+  $("#export-button").disabled = !state.profiles.length;
+  renderProfiles();
+}
+
+function openProfileDialog() {
+  $("#profile-form").reset();
+  $("#profile-direction").value = state.direction || "downstream";
+  $("#profile-sales-status").value = "new";
+  $("#profile-dialog").showModal();
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const button = $("#profile-form button[type='submit']");
+  button.disabled = true;
+  try {
+    await fetchJson("/api/leads/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        company: $("#profile-company").value,
+        direction: $("#profile-direction").value,
+        salesStatus: $("#profile-sales-status").value,
+        phone: $("#profile-phone").value,
+        region: $("#profile-region").value,
+        sector: $("#profile-sector").value,
+        owner: $("#profile-owner").value,
+        nextFollowUp: $("#profile-next-follow-up").value,
+        opportunityRole: $("#profile-opportunity-role").value,
+        email: $("#profile-email").value,
+        website: $("#profile-website").value,
+        companyWebsite: $("#profile-website").value,
+        address: $("#profile-address").value,
+        liquidConcentration: $("#profile-liquid-concentration").value,
+        monthlyVolume: $("#profile-monthly-volume").value,
+        logisticsRadius: $("#profile-logistics-radius").value,
+        commercialValue: $("#profile-commercial-value").value,
+        useCase: $("#profile-use-case").value,
+        matchReason: $("#profile-match-reason").value,
+        impurityProfile: $("#profile-impurity-profile").value,
+        storageCondition: $("#profile-storage-condition").value,
+        notes: $("#profile-notes").value,
+      }),
+    });
+    $("#profile-dialog").close();
+    await Promise.all([loadProfiles(), loadDashboard()]);
+    setNotice("公司档案已保存，重复公司会自动合并。");
+  } catch (error) {
+    setNotice(error.message || "档案保存失败", true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function formatDateTime(value) {
@@ -529,28 +696,32 @@ async function loadSystem() {
 }
 
 async function switchView(view) {
-  state.view = ["database", "alerts", "system"].includes(view) ? view : "collect";
+  state.view = ["database", "profiles", "alerts", "system"].includes(view) ? view : "collect";
   $$(".workspace-tabs button").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.view);
   });
   const alerts = state.view === "alerts";
   const database = state.view === "database";
+  const profiles = state.view === "profiles";
   const system = state.view === "system";
   $("#alerts-panel").hidden = !alerts;
+  $("#profiles-panel").hidden = !profiles;
   $("#system-panel").hidden = !system;
-  $(".table-shell").hidden = alerts || system;
+  $(".table-shell").hidden = alerts || profiles || system;
   $(".filters").hidden = alerts || system;
   $("#notice").hidden = alerts || system;
   $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
   $("#progress-panel").hidden = alerts || system || !state.activeJobId;
-  $("#quick-filters").hidden = database;
-  $("#crm-filters").hidden = !database;
+  $("#quick-filters").hidden = database || profiles;
+  $("#crm-filters").hidden = !(database || profiles);
   $("#select-all-leads").hidden = !database;
   $("#save-monitor-button").hidden = state.view !== "collect";
   $("#task-button").hidden = state.view !== "collect" || ["procurement", "environmental", "competitor"].includes(state.direction);
   $("#export-button").hidden = alerts || system;
   $("#result-title").textContent = database
     ? "销售线索数据库"
+    : profiles
+      ? "公司档案"
     : alerts
       ? "监控与跟进提醒"
       : system
@@ -564,13 +735,16 @@ async function switchView(view) {
           : state.direction === "procurement"
             ? "招投标/采购信息监控"
             : "潜在买家列表";
-  $("#filter").placeholder = database ? "搜索公司、负责人、备注、电话" : "输入公司、行业、地区、用途";
+  $("#filter").placeholder = database || profiles ? "搜索公司、负责人、备注、电话" : "输入公司、行业、地区、用途";
   if (database) await loadSavedLeads();
+  else if (profiles) await loadProfiles();
   else if (alerts) await loadAlerts();
   else if (system) await loadSystem();
   else renderLeads();
   if (database) {
     setNotice("数据库会自动合并重复企业，并保留销售状态、负责人、备注和跟进计划。");
+  } else if (profiles) {
+    setNotice("公司档案用于沉淀已跟进企业、手动新增客户和液钙供需参数。");
   }
   await loadDashboard();
 }
@@ -1172,7 +1346,10 @@ async function saveSalesRecord(event) {
       }),
     });
     $("#company-dialog").close();
-    await Promise.all([loadSavedLeads(), loadDashboard()]);
+    await Promise.all([
+      state.view === "profiles" ? loadProfiles() : loadSavedLeads(),
+      loadDashboard(),
+    ]);
     setNotice("跟进记录已保存。");
   } catch (error) {
     setNotice(error.message || "保存失败", true);
@@ -1343,7 +1520,9 @@ async function downloadBackup() {
 }
 
 async function exportCsv() {
-  const leads = state.view === "database"
+  const leads = state.view === "profiles"
+    ? state.profileFiltered
+    : state.view === "database"
     ? state.filtered
     : state.filtered.length
       ? state.filtered
@@ -1391,10 +1570,10 @@ function bindEvents() {
   $("#save-monitor-button").addEventListener("click", openMonitorDialog);
   $("#export-button").addEventListener("click", exportCsv);
   $("#logout-button").addEventListener("click", logout);
-  $("#filter").addEventListener("input", renderLeads);
-  $("#only-phone").addEventListener("change", renderLeads);
-  $("#status-filter").addEventListener("change", renderLeads);
-  $("#direction-filter").addEventListener("change", renderLeads);
+  $("#filter").addEventListener("input", renderCurrentResults);
+  $("#only-phone").addEventListener("change", renderCurrentResults);
+  $("#status-filter").addEventListener("change", renderCurrentResults);
+  $("#direction-filter").addEventListener("change", renderCurrentResults);
   $$(".workspace-tabs button").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
@@ -1435,6 +1614,17 @@ function bindEvents() {
   $("#sales-form").addEventListener("submit", saveSalesRecord);
   $("#company-dialog").addEventListener("click", (event) => {
     if (event.target === $("#company-dialog")) $("#company-dialog").close();
+  });
+  $("#profile-create-button").addEventListener("click", openProfileDialog);
+  $("#profile-close").addEventListener("click", () => $("#profile-dialog").close());
+  $("#profile-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#profile-dialog")) $("#profile-dialog").close();
+  });
+  $("#profile-form").addEventListener("submit", saveProfile);
+  $("#profile-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-profile-detail-index]");
+    if (!button) return;
+    showCompanyDetail(state.profileFiltered[Number(button.dataset.profileDetailIndex)]);
   });
   $("#monitor-close").addEventListener("click", () => $("#monitor-dialog").close());
   $("#monitor-dialog").addEventListener("click", (event) => {
