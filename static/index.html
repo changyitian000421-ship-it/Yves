@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=official-platforms-1" />
+    <link rel="stylesheet" href="/styles.css?v=monitor-options-1" />
   </head>
   <body>
     <div class="app">
@@ -13,7 +13,7 @@
           <div class="mark">Ca</div>
           <div>
             <h1>氯化钙产业线索采集器</h1>
-            <p>下游买家 · 上游副产企业 · 招采监控</p>
+            <p>买家 · 液钙货源 · 招采 · 竞品情报</p>
           </div>
         </div>
 
@@ -32,6 +32,14 @@
               <label>
                 <input type="radio" name="direction" value="procurement" />
                 <span>招投标/采购监控</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="environmental" />
+                <span>含氟废水企业雷达</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="competitor" />
+                <span>竞品/同行客户挖掘</span>
               </label>
             </div>
             <div id="direction-note" class="direction-note">
@@ -136,6 +144,66 @@
                 </select>
               </label>
             </div>
+            <div id="environmental-options" class="procurement-options" hidden>
+              <div class="section-title">环保证据来源</div>
+              <div class="notice-type-grid">
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="permit" checked />
+                  排污许可证
+                </label>
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="eia" checked />
+                  环评/审批公示
+                </label>
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="acceptance" checked />
+                  竣工环保验收
+                </label>
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="monitoring" checked />
+                  自行监测
+                </label>
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="enforcement" checked />
+                  处罚/整改
+                </label>
+                <label>
+                  <input type="checkbox" name="environmentalSource" value="company_website" checked />
+                  企业官网深度核验
+                </label>
+              </div>
+              <div class="direction-note">
+                官网证据分为明确确认、工艺推断和行业推断；行业推断只作为待核验候选。
+              </div>
+            </div>
+            <div id="competitor-options" class="procurement-options" hidden>
+              <div class="section-title">公开情报来源</div>
+              <div class="notice-type-grid">
+                <label>
+                  <input type="checkbox" name="competitorSource" value="company_website" checked />
+                  同行企业官网
+                </label>
+                <label>
+                  <input type="checkbox" name="competitorSource" value="1688" checked />
+                  1688 公开页面
+                </label>
+                <label>
+                  <input type="checkbox" name="competitorSource" value="aicaigou" checked />
+                  百度爱采购
+                </label>
+                <label>
+                  <input type="checkbox" name="competitorSource" value="chemnet" checked />
+                  中国化工网
+                </label>
+              </div>
+              <label class="toggle">
+                <input id="competitor-deep-scan" type="checkbox" checked />
+                <span>定位官网并分析产品、应用、案例和市场栏目</span>
+              </label>
+              <div class="direction-note">
+                只读取无需登录的公开页面和搜索索引，不绕过验证码；结果需打开证据页核验。
+              </div>
+            </div>
           </section>
 
           <button class="primary" type="submit">
@@ -151,11 +219,28 @@
             <h2 id="result-title">潜在买家列表</h2>
           </div>
           <div class="actions">
+            <button id="save-monitor-button" class="secondary" type="button">保存为监控</button>
             <button id="task-button" class="secondary" type="button">生成开发任务</button>
             <button id="export-button" class="secondary" type="button" disabled>导出 CSV</button>
             <button id="logout-button" class="secondary" type="button">退出</button>
           </div>
         </header>
+
+        <nav class="workspace-tabs" aria-label="工作区">
+          <button type="button" data-view="collect" class="active">采集结果</button>
+          <button type="button" data-view="database">
+            线索数据库
+            <span id="database-count" class="tab-count">0</span>
+          </button>
+          <button type="button" data-view="alerts">
+            监控与提醒
+            <span id="alert-count" class="tab-count">0</span>
+          </button>
+          <button type="button" data-view="system">
+            系统运行
+            <span id="system-count" class="tab-count">0</span>
+          </button>
+        </nav>
 
         <section class="metrics" aria-label="统计">
           <div>
@@ -172,7 +257,7 @@
           </div>
           <div>
             <span id="metric-mode">待开始</span>
-            <p>采集模式</p>
+            <p id="metric-mode-label">采集模式</p>
           </div>
         </section>
 
@@ -188,10 +273,61 @@
             <button type="button" data-filter="水处理">水处理</button>
             <button type="button" data-filter="化工">化工贸易</button>
           </div>
+          <div id="crm-filters" class="crm-filters" hidden>
+            <label class="field compact">
+              <span>销售状态</span>
+              <select id="status-filter">
+                <option value="">全部状态</option>
+                <option value="new">待核实</option>
+                <option value="contacted">已联系</option>
+                <option value="qualified">有需求</option>
+                <option value="quoted">报价中</option>
+                <option value="won">已成交</option>
+                <option value="lost">无效</option>
+              </select>
+            </label>
+            <label class="field compact">
+              <span>线索类型</span>
+              <select id="direction-filter">
+                <option value="">全部类型</option>
+                <option value="downstream">下游买家</option>
+                <option value="upstream">上游液钙</option>
+                <option value="procurement">招采信息</option>
+                <option value="environmental">含氟企业</option>
+                <option value="competitor">竞品情报</option>
+              </select>
+            </label>
+          </div>
         </section>
 
         <section id="notice" class="notice">
           当前无采集任务。
+        </section>
+
+        <section id="bulk-toolbar" class="bulk-toolbar" hidden>
+          <strong>已选 <span id="selected-count">0</span> 条</strong>
+          <label class="field compact">
+            <span>批量状态</span>
+            <select id="bulk-status">
+              <option value="">保持不变</option>
+              <option value="new">待核实</option>
+              <option value="contacted">已联系</option>
+              <option value="qualified">有需求</option>
+              <option value="quoted">报价中</option>
+              <option value="won">已成交</option>
+              <option value="lost">无效</option>
+            </select>
+          </label>
+          <label class="field compact">
+            <span>负责人</span>
+            <input id="bulk-owner" type="text" placeholder="批量分配" />
+          </label>
+          <label class="field compact">
+            <span>下次跟进</span>
+            <input id="bulk-follow-up" type="datetime-local" />
+          </label>
+          <button id="bulk-apply-button" class="secondary" type="button">应用到所选</button>
+          <button id="bulk-clear-button" class="secondary" type="button">取消选择</button>
         </section>
 
         <section id="progress-panel" class="progress-panel" hidden aria-live="polite">
@@ -212,10 +348,59 @@
           </div>
         </section>
 
+        <section id="alerts-panel" class="alerts-panel" hidden>
+          <div class="alerts-toolbar">
+            <div>
+              <h3>自动监控</h3>
+              <p>按保存的采集条件定期复查，只提醒新增线索和到期跟进。</p>
+            </div>
+            <button id="read-all-button" class="secondary" type="button">全部标为已读</button>
+          </div>
+          <div class="alert-columns">
+            <div>
+              <h4>监控任务</h4>
+              <div id="monitor-list" class="monitor-list"></div>
+            </div>
+            <div>
+              <h4>提醒中心</h4>
+              <div id="notification-list" class="notification-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="system-panel" class="system-panel" hidden>
+          <div class="alerts-toolbar">
+            <div>
+              <h3>系统运行中心</h3>
+              <p>记录采集错误、数据源异常和关键操作；备份文件包含全部线索及跟进记录。</p>
+            </div>
+            <div class="actions">
+              <button id="resolve-all-button" class="secondary" type="button">全部标记已处理</button>
+              <button id="backup-button" class="secondary" type="button">下载完整备份</button>
+            </div>
+          </div>
+          <div id="system-health" class="system-health"></div>
+          <div class="system-columns">
+            <div>
+              <h4>数据源健康</h4>
+              <div id="source-health-list" class="source-health-list"></div>
+            </div>
+            <div>
+              <h4>错误与警告</h4>
+              <div id="event-list" class="event-list"></div>
+            </div>
+          </div>
+          <div class="activity-section">
+            <h4>最近操作记录</h4>
+            <div id="activity-list" class="activity-list"></div>
+          </div>
+        </section>
+
         <section class="table-shell">
           <table>
             <thead>
               <tr>
+                <th class="select-column"><input id="select-all-leads" type="checkbox" aria-label="选择全部当前线索" /></th>
                 <th>评分</th>
                 <th>公司/任务</th>
                 <th>行业</th>
@@ -228,7 +413,7 @@
             </thead>
             <tbody id="lead-body">
               <tr class="empty-row">
-                <td colspan="8">还没有线索。选择地区和行业后开始生成。</td>
+                <td colspan="9">还没有线索。选择地区和行业后开始生成。</td>
               </tr>
             </tbody>
           </table>
@@ -245,9 +430,123 @@
         <button id="detail-close" class="icon-button" type="button" aria-label="关闭">×</button>
       </div>
       <div id="detail-grid" class="detail-grid"></div>
+      <form id="sales-form" class="sales-form" hidden>
+        <input id="sales-lead-id" type="hidden" />
+        <label class="field">
+          <span>销售状态</span>
+          <select id="sales-status">
+            <option value="new">待核实</option>
+            <option value="contacted">已联系</option>
+            <option value="qualified">有需求</option>
+            <option value="quoted">报价中</option>
+            <option value="won">已成交</option>
+            <option value="lost">无效</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>负责人</span>
+          <input id="sales-owner" type="text" placeholder="填写销售姓名" />
+        </label>
+        <label class="field">
+          <span>商机角色</span>
+          <select id="opportunity-role">
+            <option value="">待判断</option>
+            <option value="buyer">液钙买家</option>
+            <option value="supplier">液钙货源</option>
+            <option value="prospect">工艺候选</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>下次跟进</span>
+          <input id="sales-follow-up" type="datetime-local" />
+        </label>
+        <label class="field">
+          <span>液钙浓度</span>
+          <input id="liquid-concentration" type="text" placeholder="例如：30%-35%" />
+        </label>
+        <label class="field">
+          <span>月供/用量</span>
+          <input id="monthly-volume" type="text" placeholder="例如：800 吨/月" />
+        </label>
+        <label class="field">
+          <span>运输半径</span>
+          <input id="logistics-radius" type="text" placeholder="例如：300 公里" />
+        </label>
+        <label class="field">
+          <span>预估商业价值</span>
+          <input id="commercial-value" type="text" placeholder="例如：120 万元/年" />
+        </label>
+        <label class="field sales-notes">
+          <span>杂质与质量指标</span>
+          <textarea id="impurity-profile" rows="3" placeholder="铁、镁、重金属、COD、有机氯、色度等"></textarea>
+        </label>
+        <label class="field sales-notes">
+          <span>储运条件</span>
+          <textarea id="storage-condition" rows="2" placeholder="储罐、卸货泵、槽车限制、装卸时间等"></textarea>
+        </label>
+        <label class="field sales-notes">
+          <span>销售备注</span>
+          <textarea id="sales-notes" rows="4" placeholder="记录需求、报价、关键人和下一步行动"></textarea>
+        </label>
+        <button class="primary" type="submit">保存跟进记录</button>
+      </form>
       <div id="detail-actions" class="dialog-actions"></div>
     </dialog>
 
-    <script src="/app.js?v=official-platforms-1"></script>
+    <dialog id="monitor-dialog" class="company-dialog monitor-dialog">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">Automatic monitoring</div>
+          <h3>保存监控任务</h3>
+        </div>
+        <button id="monitor-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <form id="monitor-form" class="monitor-form">
+        <label class="field">
+          <span>任务名称</span>
+          <input id="monitor-name" type="text" required placeholder="例如：山东液钙采购每日监控" />
+        </label>
+        <label class="field">
+          <span>检查频率</span>
+          <select id="monitor-interval">
+            <option value="6">每6小时</option>
+            <option value="12">每12小时</option>
+            <option value="24" selected>每天</option>
+            <option value="72">每3天</option>
+            <option value="168">每周</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>监控方向</span>
+          <select id="monitor-direction">
+            <option value="downstream">下游买家</option>
+            <option value="upstream">上游液钙副产企业</option>
+            <option value="procurement">招投标/采购</option>
+            <option value="environmental">含氟废水企业</option>
+            <option value="competitor">竞品/同行情报</option>
+          </select>
+        </label>
+        <div class="monitor-option-block">
+          <div class="section-title">监控地区</div>
+          <div id="monitor-region-list" class="region-grid"></div>
+          <label class="field">
+            <span>自定义地区</span>
+            <input id="monitor-regions" type="text" placeholder="例如：山东, 河北, 黑龙江" />
+          </label>
+        </div>
+        <div class="monitor-option-block">
+          <div id="monitor-sector-title" class="section-title">监控行业/主题</div>
+          <div id="monitor-sector-list" class="sector-list"></div>
+          <label class="field">
+            <span>自定义关键词</span>
+            <textarea id="monitor-custom-keywords" rows="3" placeholder="例如：液体氯化钙, 石灰中和, 水处理药剂"></textarea>
+          </label>
+        </div>
+        <div id="monitor-summary" class="monitor-summary"></div>
+        <button class="primary" type="submit">启用自动监控</button>
+      </form>
+    </dialog>
+
+    <script src="/app.js?v=monitor-options-1"></script>
   </body>
 </html>

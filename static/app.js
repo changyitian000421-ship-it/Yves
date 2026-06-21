@@ -1,12 +1,43 @@
 const state = {
   downstreamSectors: {},
   upstreamSectors: {},
+  competitorSectors: {},
+  environmentalSectors: {},
   procurementSectors: {},
+  regionPresets: {},
   direction: "downstream",
   leads: [],
   filtered: [],
   meta: {},
   activeJobId: "",
+  view: "collect",
+  savedLeads: [],
+  dashboard: {},
+  monitors: [],
+  notifications: [],
+  currentLead: null,
+  selectedLeadIds: new Set(),
+  system: {},
+};
+
+const DIRECTION_LABELS = {
+  downstream: "下游买家",
+  upstream: "上游液钙副产企业",
+  procurement: "招投标/采购",
+  environmental: "含氟废水企业",
+  competitor: "竞品/同行情报",
+};
+
+const DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor"];
+
+const REGION_LABELS = {
+  north: "华北",
+  northeast: "东北",
+  east: "华东",
+  central: "华中",
+  south: "华南",
+  southwest: "西南",
+  northwest: "西北",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -34,11 +65,19 @@ function renderSectors() {
   const container = $("#sector-list");
   const sectors = state.direction === "upstream"
     ? state.upstreamSectors
+    : state.direction === "competitor"
+      ? state.competitorSectors
+    : state.direction === "environmental"
+      ? state.environmentalSectors
     : state.direction === "procurement"
       ? state.procurementSectors
       : state.downstreamSectors;
   const defaults = new Set(
-    state.direction === "upstream"
+    state.direction === "competitor"
+      ? ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"]
+      : state.direction === "environmental"
+      ? ["fluorochemicals", "rare_earth", "phosphorus", "surface_treatment", "electronics"]
+      : state.direction === "upstream"
       ? ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"]
       : state.direction === "procurement"
         ? ["calcium_chloride", "liquid_calcium_chloride", "deicing", "upstream_disposal"]
@@ -58,7 +97,12 @@ function renderSectors() {
 }
 
 function leadMatches(lead, query) {
-  if ($("#only-phone")?.checked && !lead.phone) return false;
+  if (
+    state.view === "collect"
+    && state.meta?.mode !== "task"
+    && $("#only-phone")?.checked
+    && !lead.phone
+  ) return false;
   if (!query) return true;
   const haystack = [
     lead.company,
@@ -79,6 +123,20 @@ function leadMatches(lead, query) {
     lead.agency,
     lead.deadline,
     lead.budget,
+    lead.sales_status_label,
+    lead.owner,
+    lead.notes,
+    lead.next_follow_up,
+    lead.opportunity_role,
+    lead.liquid_concentration,
+    lead.monthly_volume,
+    lead.impurity_profile,
+    lead.logistics_radius,
+    lead.commercial_value,
+    lead.competitor_industries,
+    lead.competitor_regions,
+    lead.competitor_keywords,
+    lead.competitor_channels,
   ]
     .join(" ")
     .toLowerCase();
@@ -91,21 +149,74 @@ function scoreClass(score) {
   return "score low";
 }
 
+function splitPhones(value) {
+  return String(value || "")
+    .split(/[;；/、,，\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function telHref(value) {
+  const cleaned = String(value || "").replace(/[^\d+]/g, "");
+  return cleaned ? `tel:${cleaned}` : "";
+}
+
+async function copyText(value) {
+  const text = String(value || "").trim();
+  if (!text) return;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (error) {
+      // Some embedded browsers block the async Clipboard API; fall back to selection copy.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "readonly");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("copy failed");
+}
+
 function renderMetrics(leads) {
+  if (state.view !== "collect") {
+    $("#metric-count").textContent = state.dashboard.total || 0;
+    $("#metric-hot").textContent = state.dashboard.highScore || 0;
+    $("#metric-phone").textContent = state.dashboard.dueFollowUps || 0;
+    $("#metric-count-label").textContent = "数据库线索";
+    $("#metric-hot-label").textContent = "高潜线索";
+    $("#metric-phone-label").textContent = "到期跟进";
+    $("#metric-mode").textContent = state.dashboard.unreadNotifications || 0;
+    $("#metric-mode-label").textContent = "未读提醒";
+    return;
+  }
   const procurement = state.meta?.direction === "procurement" || state.direction === "procurement";
+  const environmental = state.meta?.direction === "environmental" || state.direction === "environmental";
+  const competitor = state.meta?.direction === "competitor" || state.direction === "competitor";
   $("#metric-count").textContent = leads.length;
   $("#metric-hot").textContent = leads.filter((lead) => Number(lead.score) >= 70).length;
-  $("#metric-phone").textContent = procurement
-    ? leads.filter((lead) => lead.phone).length
+  $("#metric-phone").textContent = competitor
+    ? leads.filter((lead) => lead.company_website).length
+    : environmental
+    ? leads.filter((lead) => lead.poi_id).length
     : leads.filter((lead) => lead.phone).length;
-  $("#metric-count-label").textContent = procurement ? "采购单位" : "线索数量";
-  $("#metric-hot-label").textContent = procurement ? "重点项目" : "高潜线索";
-  $("#metric-phone-label").textContent = "含电话";
+  $("#metric-count-label").textContent = competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "线索数量";
+  $("#metric-hot-label").textContent = competitor ? "重点同行" : procurement ? "重点项目" : "高潜线索";
+  $("#metric-phone-label").textContent = competitor ? "已定位官网" : environmental ? "证据记录" : "含电话";
   const modeLabels = {
     amap: "真实企业",
     task: "开发任务",
     need_key: "缺少 Key",
     procurement: "招采监控",
+    environmental: "环保多源",
+    competitor: "竞品情报",
   };
   const mode = state.meta?.direction === "upstream" && state.meta?.mode === "amap"
     ? "上游副产"
@@ -113,70 +224,124 @@ function renderMetrics(leads) {
       ? modeLabels[state.meta?.mode] || "待开始"
       : "待开始";
   $("#metric-mode").textContent = mode;
+  $("#metric-mode-label").textContent = "采集模式";
 }
 
 function renderLeads() {
   const query = $("#filter").value.trim();
-  state.filtered = state.leads.filter((lead) => leadMatches(lead, query));
+  const source = state.view === "database" ? state.savedLeads : state.leads;
+  const status = $("#status-filter")?.value || "";
+  const direction = $("#direction-filter")?.value || "";
+  state.filtered = source.filter((lead) => {
+    if (state.view === "database" && status && lead.sales_status !== status) return false;
+    if (state.view === "database" && direction && lead.direction !== direction) return false;
+    return leadMatches(lead, query);
+  });
   renderMetrics(state.filtered);
 
   const tbody = $("#lead-body");
   if (!state.filtered.length) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">没有匹配的线索。</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">没有匹配的线索。</td></tr>`;
+    updateBulkToolbar();
     return;
   }
 
   tbody.innerHTML = state.filtered
     .map((lead, index) => {
+      const environmental = lead.direction === "environmental";
+      const competitor = lead.direction === "competitor";
       const phone = lead.phone || "待补充";
-      const contactOrSource = phone;
+      const phoneContent = lead.phone
+        ? `<button class="phone-button" type="button" data-detail-index="${index}" title="查看电话和企业资料">${escapeHtml(lead.phone)}</button>`
+        : `<button class="phone-button missing" type="button" data-detail-index="${index}" title="查看企业资料">待补充</button>`;
+      const contactOrSource = competitor
+        ? `${lead.evidence_count || 0} 条证据`
+        : environmental
+          ? (lead.poi_id || "待核验")
+          : phoneContent;
       const address = lead.address ? `<div class="subline">${escapeHtml(lead.address)}</div>` : "";
       const type = lead.raw_type ? `<div class="subline">${escapeHtml(lead.raw_type)}</div>` : "";
       const project = lead.project_title
         ? `<div class="subline">${escapeHtml(lead.project_title)}</div>`
         : "";
-      const companyWebsiteNotice = lead.source === "企业官网";
+      const companyWebsiteNotice = lead.source?.includes("企业官网");
       const searchUrl = lead.search_url
-        ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${state.direction === "procurement" ? (companyWebsiteNotice ? "官网公告" : "公告正文") : "搜索"}</a>`
+        ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? (companyWebsiteNotice ? "官网公告" : "公告正文") : competitor ? "来源检索" : environmental ? "证据原文" : "搜索"}</a>`
         : "";
       const website = lead.website && lead.website !== lead.search_url
-        ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${state.direction === "procurement" ? "公告页面" : "核验"}</a>`
+        ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公告页面" : competitor ? "证据页" : "核验"}</a>`
         : "";
-      const companyWebsite = companyWebsiteNotice && lead.company_website
+      const companyWebsite = lead.company_website && (companyWebsiteNotice || competitor)
         ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>`
         : "";
       const qcc = lead.qcc_url
-        ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">${state.direction === "procurement" ? "公司核验" : "企查查"}</a>`
+        ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公司核验" : "企查查"}</a>`
         : "";
-      const detail = lead.source === "高德 POI" || lead.direction === "procurement"
-        ? `<button class="detail-button" type="button" data-detail-index="${index}">详情</button>`
+      const detail = `<button class="detail-button" type="button" data-detail-index="${index}">详情</button>`;
+      const reverseAction = competitor
+        ? `<button class="detail-button reverse-button" type="button" data-reverse-index="${index}">反向开发</button>`
         : "";
       const confidence = lead.confidence
         ? `<span class="confidence confidence-${lead.confidence === "高" ? "high" : lead.confidence === "中" ? "medium" : "review"}">${escapeHtml(lead.confidence)}${lead.confidence.startsWith("官方") ? "" : "相关"}</span>`
         : "";
+      const scoreDetails = Object.entries(lead.score_details || {})
+        .map(([key, value]) => `${key} ${value}`)
+        .join(" · ");
+      const salesStatus = state.view === "database"
+        ? `<span class="sales-status status-${escapeHtml(lead.sales_status || "new")}">${escapeHtml(lead.sales_status_label || "待核实")}</span>`
+        : "";
+      const salesMeta = state.view === "database"
+        ? `<div class="subline">${lead.owner ? `负责人：${escapeHtml(lead.owner)}` : "暂未分配"}${lead.next_follow_up ? ` · 跟进：${escapeHtml(lead.next_follow_up.replace("T", " "))}` : ""}</div>`
+        : "";
+      const databaseAction = state.view === "database"
+        ? `<button class="detail-button" type="button" data-detail-index="${index}">跟进</button>`
+        : detail;
+      const roleLabels = {
+        buyer: "液钙买家",
+        supplier: "液钙货源",
+        prospect: "工艺候选",
+      };
+      const role = lead.opportunity_role
+        ? `<span class="role-badge role-${escapeHtml(lead.opportunity_role)}">${escapeHtml(competitor ? "竞品同行" : roleLabels[lead.opportunity_role] || lead.opportunity_role)}</span>`
+        : "";
+      const checked = state.selectedLeadIds.has(Number(lead.id)) ? "checked" : "";
       return `
         <tr>
-          <td><span class="${scoreClass(Number(lead.score))}">${escapeHtml(lead.score)}</span></td>
+          <td class="select-column">
+            ${state.view === "database" && lead.id
+              ? `<input type="checkbox" data-select-lead="${lead.id}" aria-label="选择 ${escapeHtml(lead.company)}" ${checked} />`
+              : ""}
+          </td>
           <td>
-            <div class="company">${escapeHtml(lead.company)}</div>
+            <span class="${scoreClass(Number(lead.score))}" title="${escapeHtml(scoreDetails)}">${escapeHtml(lead.score)}</span>
+            ${scoreDetails ? `<div class="score-breakdown">${escapeHtml(scoreDetails)}</div>` : ""}
+          </td>
+          <td>
+            <button class="company company-button" type="button" data-detail-index="${index}" title="查看公司信息、电话和证据">
+              ${escapeHtml(lead.company)}
+            </button>
+            ${salesStatus}
+            ${role}
+            ${salesMeta}
             ${project}
             ${address}
             ${type}
           </td>
           <td>${escapeHtml(lead.sector)}</td>
           <td>${escapeHtml(lead.region)}</td>
-          <td>${escapeHtml(contactOrSource)}</td>
+          <td>${competitor || environmental ? escapeHtml(contactOrSource) : contactOrSource}</td>
           <td>
             ${escapeHtml(lead.match_reason)}
             ${confidence}
             <div class="subline">${escapeHtml(lead.use_case)}</div>
           </td>
           <td>${escapeHtml(lead.pitch)}</td>
-          <td><div class="link-group">${detail}${searchUrl}${website}${companyWebsite}${qcc}</div></td>
+          <td><div class="link-group">${databaseAction}${reverseAction}${searchUrl}${website}${companyWebsite}${qcc}</div></td>
         </tr>
       `;
     })
     .join("");
+  updateBulkToolbar();
 }
 
 async function fetchConfig() {
@@ -189,12 +354,225 @@ async function fetchConfig() {
   const config = await response.json();
   state.downstreamSectors = config.downstreamSectors || config.sectors;
   state.upstreamSectors = config.upstreamSectors || {};
+  state.competitorSectors = config.competitorSectors || {};
+  state.environmentalSectors = config.environmentalSectors || state.upstreamSectors;
   state.procurementSectors = config.procurementSectors || {};
+  state.regionPresets = config.regionPresets || {};
   renderSectors();
   $("#api-status").textContent = config.hasEnvAmapKey
     ? "企业采集服务已启用"
     : "企业采集服务未配置，请联系管理员";
   $("#api-status").classList.toggle("error", !config.hasEnvAmapKey);
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    window.location.href = "/login?v=pnvs-login-1";
+    throw new Error("登录已过期");
+  }
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+async function loadDashboard() {
+  state.dashboard = await fetchJson("/api/dashboard");
+  $("#database-count").textContent = state.dashboard.total || 0;
+  $("#alert-count").textContent = state.dashboard.unreadNotifications || 0;
+  $("#system-count").textContent = state.dashboard.unresolvedEvents || 0;
+  if (state.view !== "collect") renderMetrics([]);
+}
+
+async function loadSavedLeads() {
+  const data = await fetchJson("/api/leads?limit=5000");
+  state.savedLeads = data.leads || [];
+  $("#export-button").disabled = !state.savedLeads.length;
+  renderLeads();
+}
+
+function formatDateTime(value) {
+  if (!value) return "尚未运行";
+  return String(value).replace("T", " ").slice(0, 16);
+}
+
+function monitorDirection(monitor) {
+  return monitor.direction || monitor.payload?.direction || "downstream";
+}
+
+function renderMonitorCard(monitor) {
+  return `
+    <article class="monitor-row">
+      <div>
+        <div class="monitor-title">
+          ${escapeHtml(monitor.name)}
+          <span class="monitor-state ${monitor.enabled ? "enabled" : ""}">${monitor.enabled ? "运行中" : "已暂停"}</span>
+        </div>
+        <p>${escapeHtml(monitor.summary || `每 ${monitor.intervalHours} 小时 · 下次 ${formatDateTime(monitor.nextRun)}`)}</p>
+        <p>每 ${escapeHtml(monitor.intervalHours)} 小时 · 下次 ${escapeHtml(formatDateTime(monitor.nextRun))}</p>
+        <p>${escapeHtml(monitor.lastResult || monitor.lastError || "等待首次检查")}</p>
+      </div>
+      <div class="row-actions">
+        <button type="button" data-monitor-run="${monitor.id}" title="立即运行">运行</button>
+        <button type="button" data-monitor-toggle="${monitor.id}" data-enabled="${monitor.enabled ? "0" : "1"}">${monitor.enabled ? "暂停" : "启用"}</button>
+        <button type="button" data-monitor-delete="${monitor.id}" class="danger-link">删除</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderAlerts() {
+  const grouped = DIRECTION_ORDER.map((direction) => ({
+    direction,
+    label: DIRECTION_LABELS[direction],
+    monitors: state.monitors.filter((monitor) => monitorDirection(monitor) === direction),
+  }));
+  $("#monitor-list").innerHTML = grouped.map((group) => `
+    <section class="monitor-group">
+      <div class="monitor-group-head">
+        <strong>${escapeHtml(group.label)}</strong>
+        <span>${group.monitors.length} 个监控</span>
+      </div>
+      ${group.monitors.length
+        ? group.monitors.map(renderMonitorCard).join("")
+        : `<div class="empty-state compact">暂无该方向监控。切换到“${escapeHtml(group.label)}”后点击保存为监控。</div>`}
+    </section>
+  `).join("");
+
+  $("#notification-list").innerHTML = state.notifications.length
+    ? state.notifications.map((item) => `
+      <button class="notification-row ${item.isRead ? "read" : ""} ${item.leadId ? "actionable" : ""}" type="button" data-notification-id="${item.id}" data-lead-id="${item.leadId || ""}">
+        <span class="notification-dot"></span>
+        <span>
+          <strong>${escapeHtml(item.title)}</strong>
+          <small>${escapeHtml(item.message)}</small>
+          ${item.leadId ? `<em>点击查看公司详情</em>` : ""}
+          <time>${escapeHtml(formatDateTime(item.createdAt))}</time>
+        </span>
+      </button>
+    `).join("")
+    : `<div class="empty-state">暂无提醒。</div>`;
+}
+
+async function loadAlerts() {
+  const [monitorData, notificationData] = await Promise.all([
+    fetchJson("/api/monitors"),
+    fetchJson("/api/notifications"),
+  ]);
+  state.monitors = monitorData.monitors || [];
+  state.notifications = notificationData.notifications || [];
+  renderAlerts();
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderSystem() {
+  const data = state.system || {};
+  const versionLabel = data.version === "liquid-calcium-ops-v2"
+    ? "液钙运营版 v2"
+    : data.version || "未知";
+  $("#system-health").innerHTML = [
+    ["系统版本", versionLabel],
+    ["数据库", formatBytes(data.databaseSize)],
+    ["企业采集", data.amapConfigured ? "已配置" : "未配置"],
+    ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
+  ].map(([label, value]) => `
+    <div><span>${escapeHtml(value)}</span><p>${escapeHtml(label)}</p></div>
+  `).join("");
+
+  $("#source-health-list").innerHTML = data.sources?.length
+    ? data.sources.map((source) => `
+      <div class="health-row">
+        <div>
+          <strong>${escapeHtml(source.source)}</strong>
+          <small>最近记录 ${escapeHtml(formatDateTime(source.lastEvent))}</small>
+        </div>
+        <span class="${source.errors ? "health-error" : source.warnings ? "health-warning" : "health-ok"}">
+          ${source.errors ? `${source.errors} 错误` : source.warnings ? `${source.warnings} 警告` : "正常"}
+        </span>
+      </div>
+    `).join("")
+    : `<div class="empty-state">暂时没有数据源异常记录。</div>`;
+
+  $("#event-list").innerHTML = data.events?.length
+    ? data.events.map((event) => `
+      <article class="event-row ${event.resolved ? "resolved" : ""}">
+        <span class="event-level level-${escapeHtml(event.level)}">${event.level === "error" ? "错误" : event.level === "warning" ? "警告" : "信息"}</span>
+        <div>
+          <strong>${escapeHtml(event.source || event.category)}</strong>
+          <p>${escapeHtml(event.message)}</p>
+          <time>${escapeHtml(formatDateTime(event.createdAt))}</time>
+        </div>
+        ${event.resolved ? "" : `<button type="button" data-resolve-event="${event.id}">处理</button>`}
+      </article>
+    `).join("")
+    : `<div class="empty-state">没有错误记录，系统运行正常。</div>`;
+
+  $("#activity-list").innerHTML = data.activity?.length
+    ? data.activity.map((item) => `
+      <div class="activity-row">
+        <span>${escapeHtml(item.summary)}</span>
+        <time>${escapeHtml(formatDateTime(item.createdAt))}</time>
+      </div>
+    `).join("")
+    : `<div class="empty-state">暂无操作记录。</div>`;
+}
+
+async function loadSystem() {
+  state.system = await fetchJson("/api/system");
+  renderSystem();
+}
+
+async function switchView(view) {
+  state.view = ["database", "alerts", "system"].includes(view) ? view : "collect";
+  $$(".workspace-tabs button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === state.view);
+  });
+  const alerts = state.view === "alerts";
+  const database = state.view === "database";
+  const system = state.view === "system";
+  $("#alerts-panel").hidden = !alerts;
+  $("#system-panel").hidden = !system;
+  $(".table-shell").hidden = alerts || system;
+  $(".filters").hidden = alerts || system;
+  $("#notice").hidden = alerts || system;
+  $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
+  $("#progress-panel").hidden = alerts || system || !state.activeJobId;
+  $("#quick-filters").hidden = database;
+  $("#crm-filters").hidden = !database;
+  $("#select-all-leads").hidden = !database;
+  $("#save-monitor-button").hidden = state.view !== "collect";
+  $("#task-button").hidden = state.view !== "collect" || ["procurement", "environmental", "competitor"].includes(state.direction);
+  $("#export-button").hidden = alerts || system;
+  $("#result-title").textContent = database
+    ? "销售线索数据库"
+    : alerts
+      ? "监控与跟进提醒"
+      : system
+        ? "系统运行中心"
+      : state.direction === "competitor"
+        ? "竞品/同行客户挖掘"
+      : state.direction === "upstream"
+        ? "液体氯化钙副产企业线索"
+        : state.direction === "environmental"
+          ? "含氟废水企业雷达"
+          : state.direction === "procurement"
+            ? "招投标/采购信息监控"
+            : "潜在买家列表";
+  $("#filter").placeholder = database ? "搜索公司、负责人、备注、电话" : "输入公司、行业、地区、用途";
+  if (database) await loadSavedLeads();
+  else if (alerts) await loadAlerts();
+  else if (system) await loadSystem();
+  else renderLeads();
+  if (database) {
+    setNotice("数据库会自动合并重复企业，并保留销售状态、负责人、备注和跟进计划。");
+  }
+  await loadDashboard();
 }
 
 function buildPayload() {
@@ -216,55 +594,174 @@ function buildPayload() {
     strictUpstream: $("#strict-upstream").checked,
     noticeTypes: selectedValues("noticeType"),
     procurementSources: selectedValues("procurementSource"),
+    environmentalSources: selectedValues("environmentalSource"),
+    competitorSources: selectedValues("competitorSource"),
+    competitorDeepScan: $("#competitor-deep-scan").checked,
     dateWindow: $("#date-window").value,
   };
 }
 
+function sectorLibraryForDirection(direction) {
+  if (direction === "upstream") return state.upstreamSectors;
+  if (direction === "procurement") return state.procurementSectors;
+  if (direction === "environmental") return state.environmentalSectors;
+  if (direction === "competitor") return state.competitorSectors;
+  return state.downstreamSectors;
+}
+
+function defaultSectorsForDirection(direction) {
+  if (direction === "competitor") return ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"];
+  if (direction === "environmental") return ["fluorochemicals", "rare_earth", "phosphorus", "surface_treatment", "electronics"];
+  if (direction === "upstream") return ["rare_earth", "epichlorohydrin", "fly_ash", "tungsten", "soda_ash"];
+  if (direction === "procurement") return ["calcium_chloride", "liquid_calcium_chloride", "deicing", "upstream_disposal"];
+  return ["snow", "desiccant", "water", "concrete", "trader"];
+}
+
+function monitorSelectedValues(name) {
+  return $$(`#monitor-form input[name="${name}"]:checked`).map((item) => item.value);
+}
+
+function renderMonitorRegions(selected = []) {
+  const selectedSet = new Set(selected);
+  $("#monitor-region-list").innerHTML = Object.entries(REGION_LABELS).map(([id, label]) => `
+    <label>
+      <input type="checkbox" name="monitorRegionPreset" value="${escapeHtml(id)}" ${selectedSet.has(id) ? "checked" : ""} />
+      ${escapeHtml(label)}
+    </label>
+  `).join("");
+}
+
+function renderMonitorSectors(direction, selected = []) {
+  const sectors = sectorLibraryForDirection(direction);
+  const selectedSet = new Set(selected.length ? selected : defaultSectorsForDirection(direction));
+  $("#monitor-sector-title").textContent = direction === "procurement"
+    ? "监控主题"
+    : direction === "competitor"
+      ? "竞品产品/应用方向"
+      : direction === "environmental"
+        ? "含氟废水候选行业"
+        : direction === "upstream"
+          ? "可能副产液钙的行业"
+          : "下游行业";
+  $("#monitor-sector-list").innerHTML = Object.entries(sectors)
+    .map(([id, item]) => `
+      <label>
+        <input type="checkbox" name="monitorSector" value="${escapeHtml(id)}" ${selectedSet.has(id) ? "checked" : ""} />
+        ${escapeHtml(item.name)}
+      </label>
+    `).join("");
+}
+
+function updateMonitorSummary() {
+  const direction = $("#monitor-direction").value;
+  const regions = monitorSelectedValues("monitorRegionPreset");
+  const customRegions = $("#monitor-regions").value.trim();
+  const sectorCount = monitorSelectedValues("monitorSector").length;
+  const customKeywordCount = $("#monitor-custom-keywords").value
+    .split(/[,，、;\s]+/)
+    .filter(Boolean).length;
+  const expandedRegions = regions.flatMap((region) => state.regionPresets[region] || [REGION_LABELS[region] || region]);
+  $("#monitor-summary").textContent = [
+    `类型：${DIRECTION_LABELS[direction] || "下游买家"}`,
+    `地区：${expandedRegions.join("、") || "未选择"}${customRegions ? `；自定义：${customRegions}` : ""}`,
+    `行业/主题：${sectorCount} 项${customKeywordCount ? `；自定义关键词：${customKeywordCount} 个` : ""}`,
+  ].join("；");
+}
+
+function buildMonitorPayload() {
+  const base = buildPayload();
+  const regions = monitorSelectedValues("monitorRegionPreset");
+  const customRegions = $("#monitor-regions").value.trim();
+  if (customRegions) {
+    regions.push(...customRegions.split(/[,，、;\s]+/).filter(Boolean));
+  }
+  return {
+    ...base,
+    direction: $("#monitor-direction").value,
+    regions,
+    sectors: monitorSelectedValues("monitorSector"),
+    customKeywords: $("#monitor-custom-keywords").value.trim(),
+  };
+}
+
 function setDirection(direction) {
-  state.direction = ["upstream", "procurement"].includes(direction) ? direction : "downstream";
+  state.direction = ["upstream", "procurement", "environmental", "competitor"].includes(direction) ? direction : "downstream";
   const upstream = state.direction === "upstream";
   const procurement = state.direction === "procurement";
+  const environmental = state.direction === "environmental";
+  const competitor = state.direction === "competitor";
   renderSectors();
-  $("#sector-title").textContent = upstream
+  $("#sector-title").textContent = competitor
+    ? "竞品产品/应用方向"
+    : upstream
     ? "可能副产液钙的行业"
+    : environmental
+      ? "含氟废水候选行业"
     : procurement
       ? "监控主题"
       : "下游行业";
-  $("#direction-note").textContent = upstream
+  $("#direction-note").textContent = competitor
+    ? "检索同行官网和公开平台供应商，整理其重点行业、地区、应用词和公开证据，再反向开发同类客户。"
+    : upstream
     ? "查找生产过程中可能形成液体氯化钙的企业；结果属于工艺线索，需要进一步核实。"
+    : environmental
+      ? "交叉检索排污许可、环评验收、自行监测和处罚整改，只保留有具体企业及含氟废水证据的结果。"
     : procurement
       ? "自动聚合全国、中央及已接入的省级官方采购平台，也可检查企业官网。"
       : "查找可能采购氯化钙的下游企业。";
-  $("#custom-keywords").placeholder = upstream
+  $("#custom-keywords").placeholder = competitor
+    ? "例如：液钙槽车, 山东融雪剂, 食品级氯化钙, 出口"
+    : upstream
     ? "例如：副产盐酸, 石灰中和, 湿法冶炼, 飞灰水洗"
+    : environmental
+      ? "例如：氟化工, 电镀, 光伏, 磷肥, 铝业"
     : procurement
       ? "例如：氯化钙框架采购, 液体氯化钙处置"
       : "例如：融雪剂厂家, 集装箱干燥剂, 钻井液";
   $("#exclude-suppliers-wrap").hidden = !upstream;
   $("#strict-upstream-wrap").hidden = !upstream;
-  $("#pages-wrap").hidden = procurement;
-  $("#only-phone-wrap").hidden = procurement;
-  $("#fast-mode-wrap").hidden = procurement;
+  $("#pages-wrap").hidden = procurement || competitor;
+  $("#only-phone-wrap").hidden = procurement || environmental || competitor;
+  $("#fast-mode-wrap").hidden = procurement || environmental || competitor;
   $("#procurement-options").hidden = !procurement;
-  $("#api-status").hidden = procurement;
-  $("#only-phone").checked = !upstream && !procurement;
-  $("#result-title").textContent = upstream
+  $("#environmental-options").hidden = !environmental;
+  $("#competitor-options").hidden = !competitor;
+  $("#api-status").hidden = procurement || environmental || competitor;
+  $("#only-phone").checked = !upstream && !procurement && !environmental && !competitor;
+  $("#result-title").textContent = competitor
+    ? "竞品/同行客户挖掘"
+    : upstream
     ? "液体氯化钙副产企业线索"
+    : environmental
+      ? "含氟废水企业雷达"
     : procurement
       ? "招投标/采购信息监控"
       : "潜在买家列表";
-  $("#reason-heading").textContent = upstream ? "工艺匹配依据" : procurement ? "监控规则" : "匹配原因";
-  $("#pitch-heading").textContent = upstream ? "核实重点" : procurement ? "跟进重点" : "跟进话术";
-  $("th:nth-child(2)").textContent = procurement ? "采购单位/项目" : "公司/任务";
-  $("th:nth-child(3)").textContent = procurement ? "公告类型" : "行业";
-  $("th:nth-child(5)").textContent = "电话";
-  $("#collect-button-label").textContent = upstream
+  $("#reason-heading").textContent = competitor ? "同行公开证据" : upstream ? "工艺匹配依据" : environmental ? "含氟证据依据" : procurement ? "监控规则" : "匹配原因";
+  $("#pitch-heading").textContent = competitor ? "反向开发建议" : upstream ? "核实重点" : environmental ? "处理核实重点" : procurement ? "跟进重点" : "跟进话术";
+  $("th:nth-child(3)").textContent = competitor ? "同行供应商" : procurement ? "采购单位/项目" : environmental ? "含氟企业" : "公司/任务";
+  $("th:nth-child(4)").textContent = competitor ? "重点产品" : procurement ? "公告类型" : "行业";
+  $("th:nth-child(6)").textContent = competitor ? "证据数量" : environmental ? "证据编号/类型" : "电话";
+  $("#collect-button-label").textContent = competitor
+    ? "采集同行供应商并生成画像"
+    : upstream
     ? "采集液钙副产企业"
+    : environmental
+      ? "扫描含氟废水企业"
     : procurement
       ? "采集采购单位和项目信息"
       : "采集具体公司和电话";
-  $("#task-button").hidden = procurement;
-  $("#quick-filters").innerHTML = upstream
+  $("#task-button").hidden = procurement || environmental || competitor;
+  $("#quick-filters").innerHTML = competitor
+    ? `
+      <button type="button" data-filter="">全部</button>
+      <button type="button" data-filter="液体氯化钙">液钙</button>
+      <button type="button" data-filter="融雪">融雪</button>
+      <button type="button" data-filter="干燥剂">干燥剂</button>
+      <button type="button" data-filter="水处理">水处理</button>
+      <button type="button" data-filter="同行企业官网">已定位官网</button>
+    `
+    : upstream
     ? `
       <button type="button" data-filter="">全部</button>
       <button type="button" data-filter="高">高相关</button>
@@ -272,6 +769,16 @@ function setDirection(direction) {
       <button type="button" data-filter="环氧氯丙烷">环氧氯丙烷</button>
       <button type="button" data-filter="飞灰">飞灰水洗</button>
       <button type="button" data-filter="钨">钨业</button>
+    `
+    : environmental
+      ? `
+      <button type="button" data-filter="">全部</button>
+      <button type="button" data-filter="官方许可/废水含氟">废水含氟</button>
+      <button type="button" data-filter="稀土">稀土</button>
+      <button type="button" data-filter="氟化工">氟化工</button>
+      <button type="button" data-filter="电镀">电镀</button>
+      <button type="button" data-filter="电子">电子</button>
+      <button type="button" data-filter="重点管理">重点管理</button>
     `
     : procurement
       ? `
@@ -293,11 +800,17 @@ function setDirection(direction) {
   state.filtered = [];
   state.meta = {};
   $("#filter").value = "";
-  $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="8">选择地区和行业后开始采集。</td></tr>`;
+  $("#progress-panel").hidden = true;
+  $("#export-button").disabled = true;
+  $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="9">选择地区和行业后开始采集。</td></tr>`;
   renderMetrics([]);
   setNotice(
-    upstream
+    competitor
+      ? "选择地区、产品方向和公开来源后，系统会生成同行画像及反向开发建议。"
+      : upstream
       ? "当前为上游副产液钙企业采集模式。"
+      : environmental
+        ? "选择地区、行业和证据来源后，交叉扫描含氟废水企业。"
       : procurement
         ? "选择监控主题、公告类型和时间范围后采集真实采购单位。"
         : "当前为下游买家采集模式。",
@@ -305,30 +818,43 @@ function setDirection(direction) {
 }
 
 async function runSearch(mode = "amap") {
-  const button = $(".primary");
+  const button = $("#lead-form button[type='submit']");
   const payload = buildPayload();
   if (state.direction === "procurement" && !payload.procurementSources.length) {
     setNotice("请至少选择一个采集来源。", true);
+    return;
+  }
+  if (state.direction === "environmental" && !payload.environmentalSources.length) {
+    setNotice("请至少选择一个环保证据来源。", true);
+    return;
+  }
+  if (state.direction === "competitor" && !payload.competitorSources.length) {
+    setNotice("请至少选择一个竞品信息来源。", true);
     return;
   }
   button.disabled = true;
   button.textContent = "正在采集...";
   const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
   setNotice(
-    state.direction === "procurement"
+    state.direction === "competitor"
+      ? "正在聚合同行官网和平台公开页面，并分析行业、地区与关键词布局。"
+      : state.direction === "procurement"
       ? payload.procurementSources.includes("company_website")
         ? "正在聚合官方公告，并检查目标企业官网采购栏目。"
         : "正在聚合多个官方平台的采购单位和公告详情。"
+      : state.direction === "environmental"
+      ? "正在交叉检索排污许可、环评验收、自行监测和处罚整改证据。"
       : mode === "amap"
         ? `正在采集具体公司（${scope}）。`
         : "正在生成开发任务。",
   );
-  if (state.direction === "procurement") {
+  if (["procurement", "environmental", "competitor"].includes(state.direction)) {
     payload.amapKey = "";
     payload.requireAmap = false;
   } else if (mode === "task") {
     payload.amapKey = "";
     payload.requireAmap = false;
+    payload.disableAmap = true;
   } else {
     payload.requireAmap = true;
   }
@@ -336,8 +862,12 @@ async function runSearch(mode = "amap") {
   try {
     showProgress(
       mode === "amap"
-        ? state.direction === "procurement"
+        ? state.direction === "competitor"
+          ? "正在构建同行画像"
+          : state.direction === "procurement"
           ? "正在采集采购单位"
+          : state.direction === "environmental"
+            ? "正在扫描含氟废水企业"
           : state.direction === "upstream"
             ? "正在采集副产液钙企业"
             : "正在采集买家企业"
@@ -365,6 +895,10 @@ async function runSearch(mode = "amap") {
     button.innerHTML = `<span id="collect-button-label">${
       state.direction === "procurement"
         ? "采集采购单位和项目信息"
+        : state.direction === "environmental"
+          ? "扫描含氟废水企业"
+        : state.direction === "competitor"
+          ? "采集同行供应商并生成画像"
         : state.direction === "upstream"
           ? "采集液钙副产企业"
           : "采集具体公司和电话"
@@ -394,9 +928,11 @@ function updateProgress(job) {
   $("#progress-companies").textContent = job.companyCount || 0;
   $("#progress-phones").textContent = job.phoneCount || 0;
   const procurement = state.direction === "procurement";
-  $("#progress-requests-label").textContent = procurement ? "查询" : "请求";
-  $("#progress-companies-label").textContent = procurement ? "采购单位" : "企业";
-  $("#progress-phones-label").textContent = "有电话";
+  const environmental = state.direction === "environmental";
+  const competitor = state.direction === "competitor";
+  $("#progress-requests-label").textContent = procurement || environmental || competitor ? "查询" : "请求";
+  $("#progress-companies-label").textContent = competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "企业";
+  $("#progress-phones-label").textContent = competitor ? "已定位官网" : environmental ? "证据记录" : "有电话";
 }
 
 async function pollSearchJob(jobId) {
@@ -433,6 +969,17 @@ function applySearchResult(data) {
     ? data.meta?.direction === "upstream"
       ? `已发现 ${realCount} 家可能副产液体氯化钙的企业，其中 ${phoneCount} 家有电话；请按相关度核实工艺。`
       : `已采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
+    : data.meta?.mode === "competitor"
+      ? `已整理 ${realCount} 家同行供应商，定位 ${phoneCount} 个企业官网；已生成重点行业、地区、关键词和反向开发建议。`
+    : data.meta?.mode === "environmental"
+      ? `已发现 ${realCount} 家含氟废水企业；证据来源：${(data.meta?.environmentalSources || []).map((source) => ({
+        permit: "排污许可",
+        eia: "环评审批",
+        acceptance: "竣工验收",
+        monitoring: "自行监测",
+        enforcement: "处罚整改",
+        company_website: "企业官网",
+      })[source] || source).join("、")}。`
     : data.meta?.mode === "procurement"
       ? `已采集 ${state.leads.length} 条招采公告，其中 ${phoneCount} 条含采购单位电话；来源：${(data.meta?.procurementSources || []).map((source) => ({
         ggzy: "全国公共资源",
@@ -445,7 +992,11 @@ function applySearchResult(data) {
       : data.meta?.mode === "need_key"
       ? "未开始采集。"
       : `已生成 ${state.leads.length} 条开发任务。`;
-  setNotice(`${summary}${warnings}`, Boolean(data.errors?.length));
+  const persistence = data.persistence?.total
+    ? ` 已存入线索库：新增 ${data.persistence.created || 0} 条，更新 ${data.persistence.updated || 0} 条。`
+    : "";
+  setNotice(`${summary}${persistence}${warnings}`, Boolean(data.errors?.length));
+  loadDashboard().catch(() => {});
 }
 
 function detailItem(label, value, isLink = false) {
@@ -456,25 +1007,53 @@ function detailItem(label, value, isLink = false) {
   return `<div><dt>${escapeHtml(label)}</dt><dd>${content}</dd></div>`;
 }
 
+function detailPhoneItem(value) {
+  if (!value) return detailItem("联系电话", "待补充");
+  const phones = splitPhones(value);
+  const content = phones.length
+    ? phones.map((phone) => {
+      const href = telHref(phone);
+      return href
+        ? `<a class="phone-link" href="${escapeHtml(href)}">${escapeHtml(phone)}</a>`
+        : `<span>${escapeHtml(phone)}</span>`;
+    }).join(" ")
+    : escapeHtml(value);
+  return `<div class="detail-highlight"><dt>联系电话</dt><dd>${content}</dd></div>`;
+}
+
+function detailScoreItem(lead) {
+  const scoreDetails = Object.entries(lead.score_details || {})
+    .map(([key, value]) => `${key} ${value}`)
+    .join(" · ");
+  return detailItem("智能评分", `${lead.score || 0} 分${scoreDetails ? `（${scoreDetails}）` : ""}`);
+}
+
 function showCompanyDetail(lead) {
+  state.currentLead = lead;
   const procurement = lead.direction === "procurement";
-  const companyWebsiteNotice = lead.source === "企业官网";
+  const environmental = lead.direction === "environmental";
+  const competitor = lead.direction === "competitor";
+  const companyWebsiteNotice = lead.source?.includes("企业官网");
   $("#detail-company").textContent = lead.company || (procurement ? "采购单位详情" : "企业详情");
   $("#detail-grid").innerHTML = [
+    detailScoreItem(lead),
+    detailPhoneItem(lead.phone),
     detailItem("采购项目", procurement ? lead.project_title : ""),
     detailItem("公告类型", procurement ? lead.sector : ""),
     detailItem("公告日期", procurement ? lead.notice_date : ""),
     detailItem("企业别名", lead.alias),
-    detailItem("联系电话", lead.phone),
     detailItem("项目联系人", procurement ? lead.contact_name : ""),
     detailItem("采购代理机构", procurement ? lead.agency : ""),
     detailItem("公开邮箱", lead.email),
     detailItem("企业官网", lead.company_website, true),
+    detailItem("官网/证据页", lead.website && lead.website !== lead.company_website ? lead.website : "", true),
     detailItem("所属地区", lead.region),
     detailItem("详细地址", lead.address),
-    detailItem(procurement ? "公告来源平台" : "高德行业类型", lead.raw_type),
+    detailItem("公司/项目名称", lead.company),
+    detailItem("匹配原因", lead.match_reason),
+    detailItem(competitor ? "情报类型" : procurement ? "公告来源平台" : environmental ? "环保文件类型/许可行业" : "高德行业类型", lead.raw_type),
     detailItem(
-      lead.direction === "upstream" ? "副产工艺依据" : procurement ? "数据依据" : "潜在用途",
+      competitor ? "同行公开证据" : lead.direction === "upstream" ? "副产工艺依据" : environmental ? "含氟证据依据" : procurement ? "数据依据" : "潜在用途",
       lead.process_basis || lead.use_case,
     ),
     detailItem(
@@ -483,26 +1062,300 @@ function showCompanyDetail(lead) {
     ),
     detailItem("预算金额（元）", procurement ? lead.budget : ""),
     detailItem("投标/响应截止", procurement ? lead.deadline : ""),
-    detailItem(lead.direction === "upstream" ? "建议核实内容" : "销售跟进重点", lead.pitch),
+    detailItem(competitor ? "反向开发建议" : lead.direction === "upstream" ? "建议核实内容" : environmental ? "废水处理核实重点" : "销售跟进重点", lead.pitch),
+    detailItem("重点服务行业", competitor ? lead.competitor_industries : ""),
+    detailItem("重点地区布局", competitor ? lead.competitor_regions : ""),
+    detailItem("产品/投放关键词", competitor ? lead.competitor_keywords : ""),
+    detailItem("公开渠道", competitor ? lead.competitor_channels : ""),
+    detailItem("公开证据数量", competitor ? lead.evidence_count : ""),
     detailItem("地图坐标", lead.location),
-    detailItem("高德 POI ID", lead.poi_id),
-    detailItem("数据更新时间", lead.updated_at),
+    detailItem(environmental ? "证据编号/类型" : "高德 POI ID", lead.poi_id),
+    detailItem(environmental ? "发证日期" : "数据更新时间", lead.updated_at),
     detailItem("数据来源", lead.source),
+    detailItem("商机角色", ({
+      buyer: "液钙买家",
+      supplier: "液钙货源",
+      prospect: "工艺候选",
+    })[lead.opportunity_role] || lead.opportunity_role),
+    detailItem("液钙浓度", lead.liquid_concentration),
+    detailItem("月供/用量", lead.monthly_volume),
+    detailItem("杂质与质量指标", lead.impurity_profile),
+    detailItem("运输半径", lead.logistics_radius),
+    detailItem("储运条件", lead.storage_condition),
+    detailItem("预估商业价值", lead.commercial_value),
   ].join("") || "<p>暂无更多公开信息。</p>";
   $("#detail-actions").innerHTML = [
-    lead.search_url ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${procurement ? (companyWebsiteNotice ? "官网公告" : "公告正文") : "高德地图"}</a>` : "",
-    companyWebsiteNotice && lead.company_website ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>` : "",
+    lead.company ? `<button type="button" data-copy-company="${escapeHtml(lead.company)}">复制公司名</button>` : "",
+    lead.phone ? `<button type="button" data-copy-phone="${escapeHtml(lead.phone)}">复制电话</button>` : "",
+    competitor ? `<button type="button" data-reverse-current="1">反向开发同类客户</button>` : "",
+    lead.search_url ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${competitor ? "来源检索" : procurement ? (companyWebsiteNotice ? "官网公告" : "公告正文") : environmental ? "环保证据原文" : "高德地图"}</a>` : "",
+    lead.company_website && (companyWebsiteNotice || competitor) ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>` : "",
     lead.qcc_url ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">工商信息核验</a>` : "",
     lead.website && lead.website !== lead.search_url ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${procurement ? "公告页面" : "网页搜索"}</a>` : "",
   ].join("");
+  const salesForm = $("#sales-form");
+  salesForm.hidden = !lead.id;
+  if (lead.id) {
+    $("#sales-lead-id").value = lead.id;
+    $("#sales-status").value = lead.sales_status || "new";
+    $("#sales-owner").value = lead.owner || "";
+    $("#opportunity-role").value = lead.opportunity_role || "";
+    $("#sales-follow-up").value = (lead.next_follow_up || "").slice(0, 16);
+    $("#sales-notes").value = lead.notes || "";
+    $("#liquid-concentration").value = lead.liquid_concentration || "";
+    $("#monthly-volume").value = lead.monthly_volume || "";
+    $("#impurity-profile").value = lead.impurity_profile || "";
+    $("#logistics-radius").value = lead.logistics_radius || "";
+    $("#storage-condition").value = lead.storage_condition || "";
+    $("#commercial-value").value = lead.commercial_value || "";
+  }
   $("#company-dialog").showModal();
 }
 
+function reverseDevelop(lead) {
+  if (!lead) return;
+  const industryText = lead.competitor_industries || lead.use_case || "";
+  const keywordText = lead.competitor_keywords || "";
+  const sectorMap = {
+    snow: ["融雪", "除冰", "道路"],
+    desiccant: ["干燥", "吸湿", "防潮"],
+    water: ["水处理", "污水"],
+    concrete: ["混凝土", "建材", "砂浆"],
+    oilfield: ["油田", "钻井", "完井"],
+    coldchain: ["制冷", "冷库", "冷链"],
+    trader: ["贸易", "经销", "供应链"],
+  };
+  const downstreamRadio = document.querySelector('input[name="direction"][value="downstream"]');
+  downstreamRadio.checked = true;
+  setDirection("downstream");
+  $$('input[name="sector"]').forEach((input) => {
+    input.checked = (sectorMap[input.value] || []).some((word) => industryText.includes(word));
+  });
+  if (!selectedValues("sector").length) {
+    ["snow", "desiccant", "water", "trader"].forEach((id) => {
+      const input = document.querySelector(`input[name="sector"][value="${id}"]`);
+      if (input) input.checked = true;
+    });
+  }
+  $("#regions").value = lead.competitor_regions || lead.region || "";
+  $("#custom-keywords").value = keywordText
+    .split("、")
+    .filter(Boolean)
+    .slice(0, 8)
+    .join(", ");
+  if ($("#company-dialog").open) $("#company-dialog").close();
+  setNotice(`已根据“${lead.company}”生成反向开发条件，可调整后开始采集同类客户。`);
+  $(".sidebar").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function saveSalesRecord(event) {
+  event.preventDefault();
+  const button = $("#sales-form button[type='submit']");
+  button.disabled = true;
+  try {
+    await fetchJson("/api/leads/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: Number($("#sales-lead-id").value),
+        salesStatus: $("#sales-status").value,
+        owner: $("#sales-owner").value,
+        opportunityRole: $("#opportunity-role").value,
+        nextFollowUp: $("#sales-follow-up").value,
+        notes: $("#sales-notes").value,
+        liquidConcentration: $("#liquid-concentration").value,
+        monthlyVolume: $("#monthly-volume").value,
+        impurityProfile: $("#impurity-profile").value,
+        logisticsRadius: $("#logistics-radius").value,
+        storageCondition: $("#storage-condition").value,
+        commercialValue: $("#commercial-value").value,
+      }),
+    });
+    $("#company-dialog").close();
+    await Promise.all([loadSavedLeads(), loadDashboard()]);
+    setNotice("跟进记录已保存。");
+  } catch (error) {
+    setNotice(error.message || "保存失败", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openMonitorDialog() {
+  const payload = buildPayload();
+  $("#monitor-name").value = `${DIRECTION_LABELS[state.direction]}监控`;
+  $("#monitor-direction").value = state.direction;
+  renderMonitorRegions(payload.regions.filter((region) => REGION_LABELS[region]));
+  $("#monitor-regions").value = $("#regions").value.trim();
+  renderMonitorSectors(state.direction, payload.sectors);
+  $("#monitor-custom-keywords").value = payload.customKeywords || "";
+  updateMonitorSummary();
+  $("#monitor-dialog").showModal();
+}
+
+async function saveMonitor(event) {
+  event.preventDefault();
+  const button = $("#monitor-form button[type='submit']");
+  button.disabled = true;
+  try {
+    await fetchJson("/api/monitors/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: $("#monitor-name").value,
+        intervalHours: Number($("#monitor-interval").value),
+        payload: buildMonitorPayload(),
+      }),
+    });
+    $("#monitor-dialog").close();
+    setNotice("自动监控已启用，系统将按设定频率复查并只提醒新增线索。");
+    await loadDashboard();
+  } catch (error) {
+    setNotice(error.message || "保存监控失败", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function monitorAction(event) {
+  const runButton = event.target.closest("[data-monitor-run]");
+  const toggleButton = event.target.closest("[data-monitor-toggle]");
+  const deleteButton = event.target.closest("[data-monitor-delete]");
+  if (!runButton && !toggleButton && !deleteButton) return;
+  if (runButton) {
+    await fetchJson("/api/monitors/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: Number(runButton.dataset.monitorRun) }),
+    });
+    runButton.textContent = "运行中";
+    runButton.disabled = true;
+    setTimeout(() => loadAlerts().then(loadDashboard), 2500);
+  } else if (toggleButton) {
+    await fetchJson("/api/monitors/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: Number(toggleButton.dataset.monitorToggle),
+        enabled: toggleButton.dataset.enabled === "1",
+      }),
+    });
+    await loadAlerts();
+  } else {
+    await fetchJson("/api/monitors/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: Number(deleteButton.dataset.monitorDelete) }),
+    });
+    await loadAlerts();
+  }
+}
+
+async function markNotificationsRead(id = 0) {
+  await fetchJson("/api/notifications/read", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  await Promise.all([loadAlerts(), loadDashboard()]);
+}
+
+async function openNotification(item) {
+  const notificationId = Number(item.dataset.notificationId || 0);
+  const leadId = Number(item.dataset.leadId || 0);
+  if (!leadId) {
+    await markNotificationsRead(notificationId);
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/leads/detail?id=${encodeURIComponent(leadId)}`);
+    await fetchJson("/api/notifications/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: notificationId }),
+    });
+    item.classList.add("read");
+    showCompanyDetail(data.lead);
+    await Promise.all([loadAlerts(), loadDashboard()]);
+  } catch (error) {
+    setNotice(error.message || "线索详情加载失败", true);
+  }
+}
+
+function updateBulkToolbar() {
+  const count = state.selectedLeadIds.size;
+  $("#selected-count").textContent = count;
+  $("#bulk-toolbar").hidden = state.view !== "database" || !count;
+  const visibleIds = state.filtered.map((lead) => Number(lead.id)).filter(Boolean);
+  $("#select-all-leads").checked = Boolean(
+    visibleIds.length && visibleIds.every((id) => state.selectedLeadIds.has(id)),
+  );
+}
+
+async function applyBulkUpdate() {
+  const ids = [...state.selectedLeadIds];
+  const payload = { ids };
+  if ($("#bulk-status").value) payload.salesStatus = $("#bulk-status").value;
+  if ($("#bulk-owner").value.trim()) payload.owner = $("#bulk-owner").value.trim();
+  if ($("#bulk-follow-up").value) payload.nextFollowUp = $("#bulk-follow-up").value;
+  if (Object.keys(payload).length === 1) {
+    setNotice("请选择批量状态、负责人或跟进时间。", true);
+    return;
+  }
+  const result = await fetchJson("/api/leads/bulk-update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  state.selectedLeadIds.clear();
+  $("#bulk-status").value = "";
+  $("#bulk-owner").value = "";
+  $("#bulk-follow-up").value = "";
+  await Promise.all([loadSavedLeads(), loadDashboard()]);
+  setNotice(`已批量更新 ${result.updated || 0} 条线索。`);
+}
+
+async function resolveSystemEvent(id = 0) {
+  await fetchJson("/api/system/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  await Promise.all([loadSystem(), loadDashboard()]);
+}
+
+async function downloadBackup() {
+  const response = await fetch("/api/backup");
+  if (!response.ok) {
+    setNotice("数据库备份失败。", true);
+    return;
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const anchor = document.createElement("a");
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = match?.[1] || "liquid-calcium-backup.db";
+  document.body.appendChild(anchor);
+  anchor.click();
+  URL.revokeObjectURL(anchor.href);
+  anchor.remove();
+}
+
 async function exportCsv() {
+  const leads = state.view === "database"
+    ? state.filtered
+    : state.filtered.length
+      ? state.filtered
+      : state.leads;
+  if (!leads.length) {
+    setNotice("当前没有可导出的线索。", true);
+    return;
+  }
   const response = await fetch("/api/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ leads: state.filtered.length ? state.filtered : state.leads }),
+    body: JSON.stringify({ leads }),
   });
   if (!response.ok) {
     setNotice("导出失败", true);
@@ -535,21 +1388,99 @@ function bindEvents() {
   });
 
   $("#task-button").addEventListener("click", () => runSearch("task"));
+  $("#save-monitor-button").addEventListener("click", openMonitorDialog);
   $("#export-button").addEventListener("click", exportCsv);
   $("#logout-button").addEventListener("click", logout);
   $("#filter").addEventListener("input", renderLeads);
   $("#only-phone").addEventListener("change", renderLeads);
+  $("#status-filter").addEventListener("change", renderLeads);
+  $("#direction-filter").addEventListener("change", renderLeads);
+  $$(".workspace-tabs button").forEach((button) => {
+    button.addEventListener("click", () => switchView(button.dataset.view));
+  });
   $$('input[name="direction"]').forEach((input) => {
     input.addEventListener("change", () => setDirection(input.value));
   });
   $("#lead-body").addEventListener("click", (event) => {
+    const reverseButton = event.target.closest("[data-reverse-index]");
+    if (reverseButton) {
+      reverseDevelop(state.filtered[Number(reverseButton.dataset.reverseIndex)]);
+      return;
+    }
+    const select = event.target.closest("[data-select-lead]");
+    if (select) {
+      const id = Number(select.dataset.selectLead);
+      if (select.checked) state.selectedLeadIds.add(id);
+      else state.selectedLeadIds.delete(id);
+      updateBulkToolbar();
+      return;
+    }
     const button = event.target.closest("[data-detail-index]");
     if (!button) return;
     showCompanyDetail(state.filtered[Number(button.dataset.detailIndex)]);
   });
   $("#detail-close").addEventListener("click", () => $("#company-dialog").close());
+  $("#detail-actions").addEventListener("click", (event) => {
+    const copyCompany = event.target.closest("[data-copy-company]");
+    const copyPhone = event.target.closest("[data-copy-phone]");
+    if (copyCompany || copyPhone) {
+      const value = copyCompany?.dataset.copyCompany || copyPhone?.dataset.copyPhone || "";
+      copyText(value)
+        .then(() => setNotice(copyCompany ? "公司名已复制。" : "电话已复制。"))
+        .catch(() => setNotice("复制失败，请手动选择复制。", true));
+      return;
+    }
+    if (event.target.closest("[data-reverse-current]")) reverseDevelop(state.currentLead);
+  });
+  $("#sales-form").addEventListener("submit", saveSalesRecord);
   $("#company-dialog").addEventListener("click", (event) => {
     if (event.target === $("#company-dialog")) $("#company-dialog").close();
+  });
+  $("#monitor-close").addEventListener("click", () => $("#monitor-dialog").close());
+  $("#monitor-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#monitor-dialog")) $("#monitor-dialog").close();
+  });
+  $("#monitor-direction").addEventListener("change", () => {
+    const direction = $("#monitor-direction").value;
+    renderMonitorSectors(direction);
+    if (!$("#monitor-name").value.trim() || DIRECTION_ORDER.some((item) => $("#monitor-name").value === `${DIRECTION_LABELS[item]}监控`)) {
+      $("#monitor-name").value = `${DIRECTION_LABELS[direction]}监控`;
+    }
+    updateMonitorSummary();
+  });
+  $("#monitor-region-list").addEventListener("change", updateMonitorSummary);
+  $("#monitor-sector-list").addEventListener("change", updateMonitorSummary);
+  $("#monitor-regions").addEventListener("input", updateMonitorSummary);
+  $("#monitor-custom-keywords").addEventListener("input", updateMonitorSummary);
+  $("#monitor-form").addEventListener("submit", saveMonitor);
+  $("#monitor-list").addEventListener("click", (event) => {
+    monitorAction(event).catch((error) => setNotice(error.message || "操作失败", true));
+  });
+  $("#notification-list").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-notification-id]");
+    if (item) openNotification(item);
+  });
+  $("#read-all-button").addEventListener("click", () => markNotificationsRead());
+  $("#select-all-leads").addEventListener("change", (event) => {
+    state.filtered.forEach((lead) => {
+      if (!lead.id) return;
+      if (event.target.checked) state.selectedLeadIds.add(Number(lead.id));
+      else state.selectedLeadIds.delete(Number(lead.id));
+    });
+    renderLeads();
+  });
+  $("#bulk-apply-button").addEventListener("click", () => {
+    applyBulkUpdate().catch((error) => setNotice(error.message || "批量更新失败", true));
+  });
+  $("#bulk-clear-button").addEventListener("click", () => {
+    state.selectedLeadIds.clear();
+    renderLeads();
+  });
+  $("#backup-button").addEventListener("click", downloadBackup);
+  $("#resolve-all-button").addEventListener("click", () => resolveSystemEvent());
+  $("#event-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-resolve-event]");
+    if (button) resolveSystemEvent(Number(button.dataset.resolveEvent));
   });
 
   $("#quick-filters").addEventListener("click", (event) => {
@@ -567,6 +1498,7 @@ async function init() {
     await fetchConfig();
     setDirection("downstream");
     bindEvents();
+    await loadDashboard();
   } catch (error) {
     setNotice(error.message || "初始化失败", true);
   }

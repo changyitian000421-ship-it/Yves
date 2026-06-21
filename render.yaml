@@ -2,9 +2,15 @@ services:
   - type: web
     name: calcium-chloride-leads
     runtime: docker
-    plan: free
+    plan: starter
     healthCheckPath: /health
+    disk:
+      name: liquid-calcium-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
+      - key: DATA_DIR
+        value: /var/data
       - key: APP_PASSWORD
         sync: false
       - key: LOGIN_PHONES
