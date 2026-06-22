@@ -44,6 +44,16 @@ from urllib.request import Request, urlopen
 
 import certifi
 
+try:
+    import turso
+    from turso import lib_sync as turso_sync
+except Exception as exc:  # noqa: BLE001 - optional cloud database dependency.
+    turso = None
+    turso_sync = None
+    TURSO_IMPORT_ERROR = exc
+else:
+    TURSO_IMPORT_ERROR = None
+
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -88,6 +98,7 @@ SEARCH_JOB_TTL = 60 * 60
 DATA_DIR = Path(os.getenv("DATA_DIR") or (ROOT / "data")).expanduser().resolve()
 DATABASE_PATH = DATA_DIR / "leads.db"
 BACKUP_DIR = DATA_DIR / "backups"
+TURSO_CLIENT_NAME = os.getenv("TURSO_CLIENT_NAME", "calcium-leads")
 DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
@@ -800,16 +811,76 @@ SALES_STATUSES = {
 }
 
 
+class TursoRow:
+    """Small mapping wrapper so pyturso rows behave like sqlite3.Row."""
+
+    def __init__(self, cursor: Any, row: Any) -> None:
+        self._values = tuple(row)
+        self._keys = [description[0] for description in cursor.description or ()]
+        self._mapping = dict(zip(self._keys, self._values))
+
+    def __getitem__(self, key: str | int) -> Any:
+        if isinstance(key, str):
+            return self._mapping[key]
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self) -> list[str]:
+        return list(self._keys)
+
+
+def turso_database_url() -> str:
+    return (
+        os.getenv("TURSO_DATABASE_URL")
+        or os.getenv("LIBSQL_URL")
+        or os.getenv("TURSO_DB_URL")
+        or ""
+    ).strip()
+
+
+def turso_auth_token() -> str:
+    return (
+        os.getenv("TURSO_AUTH_TOKEN")
+        or os.getenv("LIBSQL_AUTH_TOKEN")
+        or os.getenv("TURSO_DATABASE_AUTH_TOKEN")
+        or ""
+    ).strip()
+
+
+def turso_configured() -> bool:
+    return bool(turso_database_url() and turso_auth_token())
+
+
 @contextmanager
 def database_connection():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=20)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
+    using_turso = turso_configured()
+    if using_turso:
+        if turso_sync is None:
+            raise RuntimeError(f"Turso SDK 未安装或无法加载：{TURSO_IMPORT_ERROR}")
+        connection = turso_sync.connect_sync(
+            str(DATABASE_PATH),
+            turso_database_url(),
+            auth_token=turso_auth_token(),
+            client_name=TURSO_CLIENT_NAME,
+            bootstrap_if_empty=True,
+        )
+        connection.row_factory = TursoRow
+    else:
+        connection = sqlite3.connect(DATABASE_PATH, timeout=20)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
     try:
         yield connection
         connection.commit()
+        if using_turso:
+            connection.push()
     except Exception:
         connection.rollback()
         raise
@@ -1493,6 +1564,8 @@ def system_overview() -> dict[str, Any]:
     return {
         "version": APP_VERSION,
         "databaseSize": database_size,
+        "databaseMode": "turso" if turso_configured() else "sqlite",
+        "tursoConfigured": turso_configured(),
         "amapConfigured": bool(os.getenv("AMAP_KEY")),
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
         "events": [
@@ -1536,11 +1609,15 @@ def create_database_backup() -> Path:
     filename = f"liquid-calcium-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     backup_path = BACKUP_DIR / filename
     with DATABASE_LOCK, database_connection() as source:
-        target = sqlite3.connect(backup_path)
-        try:
-            source.backup(target)
-        finally:
-            target.close()
+        if turso_configured():
+            escaped_path = str(backup_path).replace("'", "''")
+            source.execute(f"VACUUM INTO '{escaped_path}'")
+        else:
+            target = sqlite3.connect(backup_path)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
     backups = sorted(BACKUP_DIR.glob("liquid-calcium-backup-*.db"), reverse=True)
     for stale in backups[10:]:
         stale.unlink(missing_ok=True)

@@ -646,6 +646,7 @@ function renderSystem() {
   $("#system-health").innerHTML = [
     ["系统版本", versionLabel],
     ["数据库", formatBytes(data.databaseSize)],
+    ["数据库模式", data.tursoConfigured ? "Turso 云同步" : "本地 SQLite"],
     ["企业采集", data.amapConfigured ? "已配置" : "未配置"],
     ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
   ].map(([label, value]) => `

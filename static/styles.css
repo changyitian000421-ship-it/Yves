@@ -1086,7 +1086,7 @@ tbody tr:hover {
 
 .system-health {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   margin: 16px 0 20px;
 }

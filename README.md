@@ -89,6 +89,7 @@ http://127.0.0.1:8765
 1. 将项目推送到 GitHub 仓库。
 2. 在 Render 创建 Blueprint，选择该仓库。
 3. 填写环境变量 `APP_PASSWORD`、`LOGIN_PHONES` 和 `AMAP_KEY`。
+   如需云端长期保存线索，再填写 `TURSO_DATABASE_URL` 和 `TURSO_AUTH_TOKEN`。
 4. `SESSION_SECRET` 会由 Render 自动生成。
 5. 开通阿里云“号码认证服务 > 短信认证”，配置：
    `ALIYUN_PNVS_ACCESS_KEY_ID`、`ALIYUN_PNVS_ACCESS_KEY_SECRET`。
@@ -99,7 +100,20 @@ http://127.0.0.1:8765
 当前 `render.yaml` 使用 Render Starter 免费部署配置，不申请持久磁盘。
 这种方式可以免费上线，但数据库保存在容器本地文件系统中；重新部署、重启或实例重建时，
 线索、备注和监控任务可能丢失。正式使用前请经常在“系统运行中心”下载完整备份，
-或后续接入 Turso/Supabase 等云数据库。
+或接入 Turso 云数据库。
+
+## Turso 云数据库
+
+配置以下环境变量后，系统会自动从本地 SQLite 切换为 Turso 云同步模式：
+
+```text
+TURSO_DATABASE_URL=libsql://你的数据库地址
+TURSO_AUTH_TOKEN=你的数据库访问令牌
+```
+
+本地不配置这两个变量时，仍然使用 `DATA_DIR` 下的 SQLite 文件。
+Render 免费部署建议配置 Turso，否则重新部署后客户档案和跟进记录可能丢失。
+系统运行中心会显示当前数据库模式：`本地 SQLite` 或 `Turso 云同步`。
 
 不要把密码或高德 Key 写进 Git 仓库。高德 Key 只保存在云平台环境变量中。
 正式部署不要配置 `SMS_DEV_MODE`。验证码由阿里云生成并通过
