@@ -160,6 +160,80 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(leads[0]["liquid_concentration"], "32%")
         self.assertEqual(leads[0]["commercial_value"], "80万元/年")
 
+    @patch("app.collect_amap_leads")
+    def test_upstream_collection_relaxes_when_strict_filter_is_empty(self, collect_amap):
+        collect_amap.side_effect = [
+            ([], []),
+            (
+                [
+                    app.Lead(
+                        company="山东候选化工有限公司",
+                        region="山东",
+                        sector="环氧氯丙烷",
+                        source="高德 POI",
+                        score=52,
+                        direction="upstream",
+                        confidence="待核验",
+                    )
+                ],
+                [],
+            ),
+        ]
+
+        result = app.collect_leads(
+            {
+                "direction": "upstream",
+                "regions": ["山东"],
+                "sectors": ["epichlorohydrin"],
+                "amapKey": "test-key",
+                "pages": 1,
+                "fastMode": True,
+                "strictUpstream": True,
+            }
+        )
+
+        self.assertEqual(result["meta"]["mode"], "amap")
+        self.assertEqual(result["leads"][0]["company"], "山东候选化工有限公司")
+        self.assertIn("放宽", " ".join(result["errors"]))
+        self.assertEqual(collect_amap.call_count, 2)
+
+    @patch("app.collect_procurement_companies")
+    def test_procurement_falls_back_to_official_search_entries(self, collect_procurement):
+        collect_procurement.return_value = ([], ["公共资源平台暂时无结果"], 1)
+
+        result = app.collect_leads(
+            {
+                "direction": "procurement",
+                "regions": ["山东"],
+                "sectors": ["liquid_calcium_chloride"],
+                "noticeTypes": ["purchase"],
+                "procurementSources": ["ggzy"],
+                "dateWindow": "30d",
+            }
+        )
+
+        self.assertGreater(len(result["leads"]), 0)
+        self.assertIn("检索入口", result["errors"][0])
+        self.assertEqual(result["leads"][0]["direction"], "procurement")
+
+    @patch("app.fetch_permit_records")
+    def test_environmental_permit_timeout_uses_verified_index(self, fetch_permit_records):
+        fetch_permit_records.side_effect = TimeoutError("timed out")
+
+        result = app.collect_leads(
+            {
+                "direction": "environmental",
+                "regions": ["山东"],
+                "sectors": ["fluorochemicals"],
+                "environmentalSources": ["permit"],
+                "pages": 1,
+            }
+        )
+
+        self.assertEqual(result["meta"]["mode"], "environmental")
+        self.assertGreaterEqual(len(result["leads"]), 1)
+        self.assertIn("已核验官方许可索引", result["errors"][0])
+
     @patch("app.fetch_html")
     def test_competitor_intelligence_builds_reverse_profile(self, fetch_html):
         fetch_html.return_value = """

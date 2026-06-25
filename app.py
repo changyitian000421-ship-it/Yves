@@ -652,6 +652,31 @@ UPSTREAM_CONSUMER_WORDS = [
     "培训",
     "学校",
 ]
+UPSTREAM_NON_COMPANY_WORDS = [
+    "地名地址",
+    "道路名",
+    "交通地名",
+    "商务住宅",
+    "生活服务",
+    "购物服务",
+    "门牌信息",
+    "住宅区",
+]
+UPSTREAM_COMPANY_HINTS = [
+    "公司",
+    "集团",
+    "有限",
+    "股份",
+    "工厂",
+    "厂",
+    "化工",
+    "材料",
+    "工业",
+    "科技",
+    "能源",
+    "环保",
+    "药业",
+]
 
 
 REGION_PRESETS: dict[str, list[str]] = {
@@ -1846,6 +1871,13 @@ def upstream_match_quality(
     return True, indicator_hit and industrial_hit
 
 
+def likely_upstream_company(name: str, raw_type: str) -> bool:
+    text = f"{name} {raw_type}"
+    if any(word in text for word in UPSTREAM_NON_COMPANY_WORDS):
+        return any(word in name for word in ["公司", "集团", "厂"])
+    return any(word in text for word in UPSTREAM_COMPANY_HINTS)
+
+
 def amap_search(
     key: str,
     city: str,
@@ -2296,6 +2328,8 @@ def collect_amap_leads(
                 if direction == "upstream":
                     upstream_text = f"{name} {raw_type}"
                     if exclude_suppliers and any(word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS):
+                        continue
+                    if not likely_upstream_company(name, raw_type):
                         continue
                     allowed, strong_match = upstream_match_quality(name, raw_type, sector)
                     if not allowed or (strict_upstream and not strong_match):
@@ -3322,7 +3356,7 @@ def fetch_permit_records(
             "treadcode": "",
             "publishtime": "",
         },
-        timeout=25,
+        timeout=8,
         referer=PERMIT_LIST_URL,
     )
     if "错误页" in page and "请您访问" in page:
@@ -4257,6 +4291,15 @@ def collect_environmental_permits(
                 f"排污许可/{first_region}/{first_keyword}/第{first_page_number}页：{exc}"
             )
         except Exception as exc:  # noqa: BLE001
+            indexed_leads = indexed_fluoride_permit_leads(selected_regions, sectors)
+            if indexed_leads:
+                warning = (
+                    f"排污许可公开端访问超时或限制直连，已切换到 {len(indexed_leads)} 条"
+                    "废水含氟的已核验官方许可索引。"
+                )
+                if progress_callback:
+                    progress_callback(1, 1, len(indexed_leads), len(indexed_leads), warning)
+                return indexed_leads, [warning], 1
             errors.append(
                 f"排污许可/{first_region}/{first_keyword}/第{first_page_number}页：{exc}"
             )
@@ -4298,6 +4341,14 @@ def collect_environmental_permits(
                 )
 
     selected_records = list(records.values())[:40]
+    if not selected_records:
+        indexed_leads = indexed_fluoride_permit_leads(selected_regions, sectors)
+        if indexed_leads:
+            warning = (
+                f"排污许可公开端未返回可解析记录，已切换到 {len(indexed_leads)} 条"
+                "废水含氟的已核验官方许可索引。"
+            )
+            return indexed_leads, [warning, *errors[:5]], max(1, total_jobs)
     leads: list[Lead] = []
 
     def build_lead(item: tuple[dict[str, str], str, str]) -> Lead:
@@ -4858,6 +4909,19 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             deduped.setdefault(key, lead)
         leads = list(deduped.values())
         leads = sorted(leads, key=lambda item: item.score, reverse=True)
+        if not leads:
+            leads = procurement_monitor_entries(
+                regions,
+                sectors,
+                custom_keywords,
+                notice_type_ids,
+                date_window_id,
+            )
+            if leads:
+                errors.insert(
+                    0,
+                    "官方平台暂未返回具体公告，已生成中国政府采购网/公共资源交易平台检索入口。",
+                )
         return {
             "leads": [asdict(lead) for lead in leads],
             "errors": errors[:40],
@@ -4893,6 +4957,23 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             strict_upstream,
             progress_callback,
         )
+        if direction == "upstream" and not leads and strict_upstream:
+            relaxed_leads, relaxed_errors = collect_amap_leads(
+                amap_key,
+                regions,
+                sectors,
+                custom_keywords,
+                pages,
+                max(keyword_limit, 4),
+                direction,
+                exclude_suppliers,
+                False,
+                progress_callback,
+            )
+            if relaxed_leads:
+                leads = relaxed_leads
+                errors.extend(relaxed_errors)
+                errors.append("严格工艺匹配未命中，已放宽为上游候选企业；请打开详情核验实际副产工艺。")
         if not leads:
             leads = fallback_leads(regions, sectors, custom_keywords, direction)
             used_fallback = True
