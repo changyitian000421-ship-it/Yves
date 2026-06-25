@@ -1170,7 +1170,7 @@ function applySearchResult(data) {
   const persistence = data.persistence?.total
     ? ` 已存入线索库：新增 ${data.persistence.created || 0} 条，更新 ${data.persistence.updated || 0} 条。`
     : "";
-  setNotice(`${summary}${persistence}${warnings}`, Boolean(data.errors?.length));
+  setNotice(`${summary}${persistence}${warnings}`, Boolean(data.errors?.length && !state.leads.length));
   loadDashboard().catch(() => {});
 }
 
