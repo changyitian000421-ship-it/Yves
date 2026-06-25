@@ -5039,6 +5039,33 @@ def update_search_job(
         )
 
 
+def persist_search_result(result: dict[str, Any], job_id: str = "") -> dict[str, Any]:
+    if result.get("meta", {}).get("mode") in {"task", "need_key"}:
+        return {"created": 0, "updated": 0, "total": 0}
+    try:
+        return save_leads(result.get("leads") or [])
+    except Exception as exc:  # noqa: BLE001 - keep collected leads visible when cloud DB is misconfigured.
+        message = (
+            f"采集已完成，但保存到数据库失败：{exc}。"
+            "如果这是 Render 网页版，请检查 TURSO_DATABASE_URL、TURSO_AUTH_TOKEN；"
+            "未使用 Turso 时请不要配置这两个变量。"
+        )
+        result.setdefault("errors", []).insert(0, message)
+        log_system_event(
+            "error",
+            "database",
+            message,
+            source="turso" if turso_configured() else "sqlite",
+            details={"jobId": job_id, "mode": result.get("meta", {}).get("mode")},
+        )
+        return {
+            "created": 0,
+            "updated": 0,
+            "total": 0,
+            "error": str(exc),
+        }
+
+
 def run_search_job(job_id: str, payload: dict[str, Any]) -> None:
     try:
         result = collect_leads(
@@ -5052,11 +5079,7 @@ def run_search_job(job_id: str, payload: dict[str, Any]) -> None:
                 current,
             ),
         )
-        persistence = (
-            save_leads(result.get("leads") or [])
-            if result.get("meta", {}).get("mode") not in {"task", "need_key"}
-            else {"created": 0, "updated": 0, "total": 0}
-        )
+        persistence = persist_search_result(result, job_id)
         result["persistence"] = persistence
         for error in result.get("errors") or []:
             level = "warning" if result.get("leads") else "error"
@@ -5598,6 +5621,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     },
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
+                    "tursoConfigured": turso_configured(),
                 },
             )
             return
@@ -5851,11 +5875,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/search":
             result = collect_leads(payload)
-            result["persistence"] = (
-                save_leads(result.get("leads") or [])
-                if result.get("meta", {}).get("mode") not in {"task", "need_key"}
-                else {"created": 0, "updated": 0, "total": 0}
-            )
+            result["persistence"] = persist_search_result(result)
             for error in result.get("errors") or []:
                 log_system_event(
                     "warning" if result.get("leads") else "error",

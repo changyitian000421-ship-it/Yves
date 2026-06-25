@@ -20,6 +20,8 @@ const state = {
   currentLead: null,
   selectedLeadIds: new Set(),
   system: {},
+  hasEnvAmapKey: false,
+  tursoConfigured: false,
 };
 
 const DIRECTION_LABELS = {
@@ -385,11 +387,13 @@ async function fetchConfig() {
   state.environmentalSectors = config.environmentalSectors || state.upstreamSectors;
   state.procurementSectors = config.procurementSectors || {};
   state.regionPresets = config.regionPresets || {};
+  state.hasEnvAmapKey = Boolean(config.hasEnvAmapKey);
+  state.tursoConfigured = Boolean(config.tursoConfigured);
   renderSectors();
-  $("#api-status").textContent = config.hasEnvAmapKey
+  $("#api-status").textContent = state.hasEnvAmapKey
     ? "企业采集服务已启用"
-    : "企业采集服务未配置，请联系管理员";
-  $("#api-status").classList.toggle("error", !config.hasEnvAmapKey);
+    : "企业采集服务未配置：请在 Render 环境变量中填写 AMAP_KEY";
+  $("#api-status").classList.toggle("error", !state.hasEnvAmapKey);
 }
 
 async function fetchJson(url, options = {}) {
@@ -1005,6 +1009,14 @@ async function runSearch(mode = "amap") {
   }
   if (state.direction === "competitor" && !payload.competitorSources.length) {
     setNotice("请至少选择一个竞品信息来源。", true);
+    return;
+  }
+  if (
+    mode === "amap"
+    && !["procurement", "environmental", "competitor"].includes(state.direction)
+    && !state.hasEnvAmapKey
+  ) {
+    setNotice("网页端未配置高德 AMAP_KEY。请到 Render 的 Environment 添加 AMAP_KEY 后重新部署；本地能采集是因为本机 local.env 已配置 Key。", true);
     return;
   }
   button.disabled = true;
