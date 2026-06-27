@@ -124,6 +124,58 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(lead["company"], "测试新线索有限公司")
         self.assertEqual(lead["phone"], "0531-12345678")
 
+    def test_save_leads_discards_invalid_monitor_foreign_key(self):
+        result = app.save_leads(
+            [
+                {
+                    "company": "无效监控关联测试有限公司",
+                    "direction": "downstream",
+                    "region": "山东",
+                    "sector": "水处理",
+                }
+            ],
+            monitor_id=999999,
+        )
+
+        self.assertEqual(result["created"], 1)
+        with app.database_connection() as connection:
+            lead = connection.execute(
+                "SELECT id, monitor_id FROM leads WHERE company = ?",
+                ("无效监控关联测试有限公司",),
+            ).fetchone()
+            notification = connection.execute(
+                "SELECT lead_id, monitor_id FROM notifications WHERE lead_id = ?",
+                (lead["id"],),
+            ).fetchone()
+
+        self.assertIsNone(lead["monitor_id"])
+        self.assertEqual(notification["lead_id"], lead["id"])
+        self.assertIsNone(notification["monitor_id"])
+
+    def test_bulk_save_notifications_reference_existing_leads(self):
+        leads = [
+            {
+                "company": f"批量保存测试企业{i}有限公司",
+                "direction": "downstream",
+                "region": "山东",
+                "sector": "水处理",
+            }
+            for i in range(120)
+        ]
+
+        result = app.save_leads(leads)
+
+        self.assertEqual(result["created"], 120)
+        with app.database_connection() as connection:
+            orphan_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM notifications AS notification
+                LEFT JOIN leads AS lead ON lead.id = notification.lead_id
+                WHERE notification.lead_id IS NOT NULL AND lead.id IS NULL
+                """
+            ).fetchone()[0]
+        self.assertEqual(orphan_count, 0)
+
     def test_manual_profile_create_is_deduplicated_and_keeps_sales_fields(self):
         first = app.create_manual_lead(
             {

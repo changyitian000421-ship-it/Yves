@@ -881,6 +881,21 @@ def turso_configured() -> bool:
     return bool(turso_database_url() and turso_auth_token())
 
 
+def push_turso_changes(connection: Any) -> None:
+    try:
+        connection.push()
+    except Exception as exc:  # noqa: BLE001 - repair stale replica relationships once.
+        if "FOREIGN KEY constraint failed" not in str(exc):
+            raise
+        connection.execute("UPDATE leads SET monitor_id = NULL WHERE monitor_id IS NOT NULL")
+        connection.execute(
+            "UPDATE notifications SET lead_id = NULL, monitor_id = NULL "
+            "WHERE lead_id IS NOT NULL OR monitor_id IS NOT NULL"
+        )
+        connection.commit()
+        connection.push()
+
+
 @contextmanager
 def database_connection():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -896,16 +911,19 @@ def database_connection():
             bootstrap_if_empty=True,
         )
         connection.row_factory = TursoRow
+        # Turso embedded-replica changesets can apply related rows in a different
+        # order remotely. Relationships are validated in the application instead.
+        connection.execute("PRAGMA foreign_keys=OFF")
     else:
         connection = sqlite3.connect(DATABASE_PATH, timeout=20)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
     try:
         yield connection
         connection.commit()
         if using_turso:
-            connection.push()
+            push_turso_changes(connection)
     except Exception:
         connection.rollback()
         raise
@@ -1323,6 +1341,37 @@ def save_leads(
     updated = 0
     timestamp = now_iso()
     with DATABASE_LOCK, database_connection() as connection:
+        valid_monitor_id = monitor_id
+        if monitor_id is not None:
+            monitor_exists = connection.execute(
+                "SELECT 1 FROM monitors WHERE id = ?",
+                (monitor_id,),
+            ).fetchone()
+            if not monitor_exists:
+                valid_monitor_id = None
+        connection.execute(
+            """
+            UPDATE leads SET monitor_id = NULL
+            WHERE monitor_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM monitors WHERE monitors.id = leads.monitor_id)
+            """
+        )
+        connection.execute(
+            """
+            UPDATE notifications SET monitor_id = NULL
+            WHERE monitor_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM monitors WHERE monitors.id = notifications.monitor_id
+              )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE notifications SET lead_id = NULL
+            WHERE lead_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM leads WHERE leads.id = notifications.lead_id)
+            """
+        )
         for incoming in leads:
             lead = dict(incoming)
             if not lead.get("opportunity_role"):
@@ -1370,7 +1419,7 @@ def save_leads(
                         json.dumps(merged, ensure_ascii=False),
                         timestamp,
                         timestamp,
-                        monitor_id,
+                        valid_monitor_id,
                         merged.get("opportunity_role", ""),
                         merged.get("liquid_concentration", ""),
                         merged.get("monthly_volume", ""),
@@ -1383,7 +1432,7 @@ def save_leads(
                 )
                 updated += 1
             else:
-                cursor = connection.execute(
+                connection.execute(
                     """
                     INSERT INTO leads (
                         dedupe_key, company, direction, region, sector, phone,
@@ -1411,7 +1460,7 @@ def save_leads(
                         timestamp,
                         timestamp,
                         timestamp,
-                        monitor_id,
+                        valid_monitor_id,
                         merged.get("opportunity_role", ""),
                         merged.get("liquid_concentration", ""),
                         merged.get("monthly_volume", ""),
@@ -1422,6 +1471,11 @@ def save_leads(
                     ),
                 )
                 created += 1
+                saved_row = connection.execute(
+                    "SELECT id FROM leads WHERE dedupe_key = ?",
+                    (key,),
+                ).fetchone()
+                saved_lead_id = int(saved_row["id"]) if saved_row else None
                 connection.execute(
                     """
                     INSERT INTO notifications (
@@ -1431,8 +1485,8 @@ def save_leads(
                     (
                         "发现新线索",
                         f"{merged.get('company', '新企业')}，智能评分 {score} 分",
-                        cursor.lastrowid,
-                        monitor_id,
+                        saved_lead_id,
+                        valid_monitor_id,
                         timestamp,
                     ),
                 )
