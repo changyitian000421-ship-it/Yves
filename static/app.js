@@ -647,10 +647,15 @@ function renderSystem() {
   const versionLabel = data.version === "liquid-calcium-ops-v2"
     ? "液钙运营版 v2"
     : data.version || "未知";
+  const databaseMode = data.tursoConfigured
+    ? "Turso 云同步"
+    : data.tursoEnvConfigured
+      ? "SQLite 自动降级"
+      : "本地 SQLite";
   $("#system-health").innerHTML = [
     ["系统版本", versionLabel],
     ["数据库", formatBytes(data.databaseSize)],
-    ["数据库模式", data.tursoConfigured ? "Turso 云同步" : "本地 SQLite"],
+    ["数据库模式", databaseMode],
     ["企业采集", data.amapConfigured ? "已配置" : "未配置"],
     ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
   ].map(([label, value]) => `

@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,15 +61,51 @@ class LiquidCalciumAppTests(unittest.TestCase):
 
         backup = app.create_database_backup()
         self.assertTrue(backup.exists())
-        with sqlite3.connect(backup) as connection:
+        connection = sqlite3.connect(backup)
+        try:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM system_events"
                 ).fetchone()[0],
                 1,
             )
+        finally:
+            connection.close()
         app.ensure_daily_backup()
         self.assertEqual(len(list(app.BACKUP_DIR.glob("*.db"))), 1)
+
+    def test_turso_connection_failure_falls_back_to_sqlite(self):
+        original_disabled = app.TURSO_RUNTIME_DISABLED
+        original_error = app.TURSO_RUNTIME_ERROR
+        app.TURSO_RUNTIME_DISABLED = False
+        app.TURSO_RUNTIME_ERROR = ""
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "TURSO_DATABASE_URL": "libsql://invalid.example",
+                        "TURSO_AUTH_TOKEN": "invalid-token",
+                    },
+                ),
+                patch.object(app, "turso_sync") as sync_driver,
+            ):
+                sync_driver.connect_sync.side_effect = RuntimeError("auth failed")
+                with app.database_connection() as connection:
+                    connection.execute("CREATE TABLE IF NOT EXISTS fallback_test(id INTEGER)")
+                    connection.execute("INSERT INTO fallback_test(id) VALUES (1)")
+                connection = sqlite3.connect(app.DATABASE_PATH)
+                try:
+                    count = connection.execute("SELECT COUNT(*) FROM fallback_test").fetchone()[0]
+                finally:
+                    connection.close()
+
+            self.assertEqual(count, 1)
+            self.assertTrue(app.TURSO_RUNTIME_DISABLED)
+            self.assertIn("auth failed", app.TURSO_RUNTIME_ERROR)
+        finally:
+            app.TURSO_RUNTIME_DISABLED = original_disabled
+            app.TURSO_RUNTIME_ERROR = original_error
 
     def test_monitor_duplicate_run_is_rejected(self):
         app.MONITOR_RUNNING.add(77)

@@ -97,8 +97,11 @@ SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_TTL = 60 * 60
 DATA_DIR = Path(os.getenv("DATA_DIR") or (ROOT / "data")).expanduser().resolve()
 DATABASE_PATH = DATA_DIR / "leads.db"
+TURSO_REPLICA_PATH = DATA_DIR / "turso-replica.db"
 BACKUP_DIR = DATA_DIR / "backups"
 TURSO_CLIENT_NAME = os.getenv("TURSO_CLIENT_NAME", "calcium-leads")
+TURSO_RUNTIME_DISABLED = False
+TURSO_RUNTIME_ERROR = ""
 DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
@@ -881,6 +884,20 @@ def turso_configured() -> bool:
     return bool(turso_database_url() and turso_auth_token())
 
 
+def turso_active() -> bool:
+    return turso_configured() and not TURSO_RUNTIME_DISABLED
+
+
+def disable_turso_runtime(error: Any) -> None:
+    global TURSO_RUNTIME_DISABLED, TURSO_RUNTIME_ERROR
+    TURSO_RUNTIME_DISABLED = True
+    TURSO_RUNTIME_ERROR = str(error)
+    print(
+        f"WARNING: Turso unavailable, falling back to local SQLite: {TURSO_RUNTIME_ERROR}",
+        flush=True,
+    )
+
+
 def push_turso_changes(connection: Any) -> None:
     try:
         connection.push()
@@ -899,34 +916,44 @@ def push_turso_changes(connection: Any) -> None:
 @contextmanager
 def database_connection():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    using_turso = turso_configured()
+    using_turso = turso_active()
     if using_turso:
         if turso_sync is None:
-            raise RuntimeError(f"Turso SDK 未安装或无法加载：{TURSO_IMPORT_ERROR}")
-        connection = turso_sync.connect_sync(
-            str(DATABASE_PATH),
-            turso_database_url(),
-            auth_token=turso_auth_token(),
-            client_name=TURSO_CLIENT_NAME,
-            bootstrap_if_empty=True,
-        )
-        connection.row_factory = TursoRow
-        # Turso embedded-replica changesets can apply related rows in a different
-        # order remotely. Relationships are validated in the application instead.
-        connection.execute("PRAGMA foreign_keys=OFF")
-    else:
+            disable_turso_runtime(f"Turso SDK 未安装或无法加载：{TURSO_IMPORT_ERROR}")
+            using_turso = False
+        else:
+            try:
+                connection = turso_sync.connect_sync(
+                    str(TURSO_REPLICA_PATH),
+                    turso_database_url(),
+                    auth_token=turso_auth_token(),
+                    client_name=TURSO_CLIENT_NAME,
+                    bootstrap_if_empty=True,
+                )
+                connection.row_factory = TursoRow
+                # Turso embedded-replica changesets can apply related rows in a
+                # different order remotely. Relationships are validated in-app.
+                connection.execute("PRAGMA foreign_keys=OFF")
+            except Exception as exc:  # noqa: BLE001 - keep the web service available.
+                disable_turso_runtime(exc)
+                using_turso = False
+    if not using_turso:
         connection = sqlite3.connect(DATABASE_PATH, timeout=20)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
     try:
         yield connection
-        connection.commit()
-        if using_turso:
-            push_turso_changes(connection)
     except Exception:
         connection.rollback()
         raise
+    else:
+        connection.commit()
+        if using_turso:
+            try:
+                push_turso_changes(connection)
+            except Exception as exc:  # noqa: BLE001 - do not crash Render on sync failure.
+                disable_turso_runtime(exc)
     finally:
         connection.close()
 
@@ -1639,12 +1666,15 @@ def system_overview() -> dict[str, Any]:
             ORDER BY last_event DESC
             """
         ).fetchall()
-        database_size = DATABASE_PATH.stat().st_size if DATABASE_PATH.exists() else 0
+        active_database_path = TURSO_REPLICA_PATH if turso_active() else DATABASE_PATH
+        database_size = active_database_path.stat().st_size if active_database_path.exists() else 0
     return {
         "version": APP_VERSION,
         "databaseSize": database_size,
-        "databaseMode": "turso" if turso_configured() else "sqlite",
-        "tursoConfigured": turso_configured(),
+        "databaseMode": "turso" if turso_active() else "sqlite",
+        "tursoConfigured": turso_active(),
+        "tursoEnvConfigured": turso_configured(),
+        "tursoError": TURSO_RUNTIME_ERROR,
         "amapConfigured": bool(os.getenv("AMAP_KEY")),
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
         "events": [
@@ -1688,7 +1718,7 @@ def create_database_backup() -> Path:
     filename = f"liquid-calcium-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     backup_path = BACKUP_DIR / filename
     with DATABASE_LOCK, database_connection() as source:
-        if turso_configured():
+        if turso_active():
             escaped_path = str(backup_path).replace("'", "''")
             source.execute(f"VACUUM INTO '{escaped_path}'")
         else:
@@ -5109,7 +5139,7 @@ def persist_search_result(result: dict[str, Any], job_id: str = "") -> dict[str,
             "error",
             "database",
             message,
-            source="turso" if turso_configured() else "sqlite",
+            source="turso" if turso_active() else "sqlite",
             details={"jobId": job_id, "mode": result.get("meta", {}).get("mode")},
         )
         return {
@@ -5675,7 +5705,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                     },
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
-                    "tursoConfigured": turso_configured(),
+                    "tursoConfigured": turso_active(),
+                    "tursoEnvConfigured": turso_configured(),
+                    "tursoError": TURSO_RUNTIME_ERROR,
                 },
             )
             return
