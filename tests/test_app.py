@@ -11,15 +11,26 @@ import app
 class LiquidCalciumAppTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_paths = (app.DATA_DIR, app.DATABASE_PATH, app.BACKUP_DIR)
+        self.original_paths = (
+            app.DATA_DIR,
+            app.DATABASE_PATH,
+            app.TURSO_REPLICA_PATH,
+            app.BACKUP_DIR,
+        )
         app.DATA_DIR = Path(self.temp_dir.name)
         app.DATABASE_PATH = app.DATA_DIR / "leads.db"
+        app.TURSO_REPLICA_PATH = app.DATA_DIR / "turso-replica.db"
         app.BACKUP_DIR = app.DATA_DIR / "backups"
         app.initialize_database()
 
     def tearDown(self):
         app.MONITOR_RUNNING.clear()
-        app.DATA_DIR, app.DATABASE_PATH, app.BACKUP_DIR = self.original_paths
+        (
+            app.DATA_DIR,
+            app.DATABASE_PATH,
+            app.TURSO_REPLICA_PATH,
+            app.BACKUP_DIR,
+        ) = self.original_paths
         self.temp_dir.cleanup()
 
     def test_liquid_supplier_is_scored_and_deduplicated(self):
@@ -106,6 +117,36 @@ class LiquidCalciumAppTests(unittest.TestCase):
         finally:
             app.TURSO_RUNTIME_DISABLED = original_disabled
             app.TURSO_RUNTIME_ERROR = original_error
+
+    @patch("app.create_database_backup")
+    @patch("app.turso_active", return_value=True)
+    def test_daily_backup_is_skipped_for_turso(self, _turso_active, create_backup):
+        app.ensure_daily_backup()
+        create_backup.assert_not_called()
+
+    @patch("app.log_activity")
+    @patch("app.turso_active", return_value=True)
+    def test_turso_manual_backup_uses_sqlite_replica(
+        self,
+        _turso_active,
+        _log_activity,
+    ):
+        connection = sqlite3.connect(app.TURSO_REPLICA_PATH)
+        try:
+            connection.execute("CREATE TABLE sample(id INTEGER PRIMARY KEY, value TEXT)")
+            connection.execute("INSERT INTO sample(value) VALUES ('ok')")
+            connection.commit()
+        finally:
+            connection.close()
+
+        backup = app.create_database_backup()
+
+        connection = sqlite3.connect(backup)
+        try:
+            value = connection.execute("SELECT value FROM sample").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(value, "ok")
 
     def test_monitor_duplicate_run_is_rejected(self):
         app.MONITOR_RUNNING.add(77)

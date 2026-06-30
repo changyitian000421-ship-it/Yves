@@ -1717,16 +1717,24 @@ def create_database_backup() -> Path:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"liquid-calcium-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
     backup_path = BACKUP_DIR / filename
-    with DATABASE_LOCK, database_connection() as source:
+    with DATABASE_LOCK:
         if turso_active():
-            escaped_path = str(backup_path).replace("'", "''")
-            source.execute(f"VACUUM INTO '{escaped_path}'")
-        else:
+            if not TURSO_REPLICA_PATH.exists():
+                raise RuntimeError("Turso 本地副本尚未创建，请稍后再试")
+            source = sqlite3.connect(TURSO_REPLICA_PATH, timeout=20)
             target = sqlite3.connect(backup_path)
             try:
                 source.backup(target)
             finally:
+                source.close()
                 target.close()
+        else:
+            with database_connection() as source:
+                target = sqlite3.connect(backup_path)
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
     backups = sorted(BACKUP_DIR.glob("liquid-calcium-backup-*.db"), reverse=True)
     for stale in backups[10:]:
         stale.unlink(missing_ok=True)
@@ -1735,6 +1743,8 @@ def create_database_backup() -> Path:
 
 
 def ensure_daily_backup() -> None:
+    if turso_active():
+        return
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     today = date.today()
     latest = max(
