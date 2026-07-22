@@ -106,7 +106,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v2"
+APP_VERSION = "liquid-calcium-ops-v3"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -827,6 +827,13 @@ class Lead:
     competitor_keywords: str = ""
     competitor_channels: str = ""
     evidence_count: int = 0
+    relevance_score: int = 0
+    quality_grade: str = ""
+    quality_label: str = ""
+    quality_reasons: str = ""
+    quality_issues: str = ""
+    recommended_action: str = ""
+    actionable: bool = False
 
 
 SALES_STATUSES = {
@@ -1162,6 +1169,28 @@ def lead_dedupe_key(lead: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def split_contact_values(value: Any) -> list[str]:
+    return [
+        item.strip()
+        for item in re.split(r"[;；、,，\n]+", str(value or ""))
+        if item.strip()
+    ]
+
+
+def merge_contact_values(existing: Any, incoming: Any, limit: int = 8) -> str:
+    values: list[str] = []
+    normalized: set[str] = set()
+    for item in [*split_contact_values(existing), *split_contact_values(incoming)]:
+        key = re.sub(r"\s+", "", item).lower()
+        if not key or key in normalized:
+            continue
+        normalized.add(key)
+        values.append(item)
+        if len(values) >= limit:
+            break
+    return "；".join(values)
+
+
 def parse_date_value(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
@@ -1176,7 +1205,13 @@ def parse_date_value(value: Any) -> date | None:
 
 
 def calculate_lead_score(lead: dict[str, Any]) -> tuple[int, dict[str, int]]:
-    base = max(0, min(int(lead.get("score") or 0), 60))
+    # relevance_score is the collector's immutable match score. Keeping it
+    # separate prevents repeated saves from feeding the total score back into
+    # the next calculation and gradually inflating a lead to 100.
+    relevance = lead.get("relevance_score")
+    if relevance in (None, ""):
+        relevance = lead.get("score") or 0
+    base = max(0, min(int(relevance), 60))
     contact = 0
     if lead.get("phone"):
         contact += 12
@@ -1241,11 +1276,175 @@ def calculate_lead_score(lead: dict[str, Any]) -> tuple[int, dict[str, int]]:
     }
 
 
+def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
+    direction = str(lead.get("direction") or "downstream")
+    company = str(lead.get("company") or "").strip()
+    source = str(lead.get("source") or "")
+    confidence = str(lead.get("confidence") or "")
+    evidence_text = " ".join(
+        str(lead.get(key) or "")
+        for key in (
+            "source",
+            "confidence",
+            "match_reason",
+            "process_basis",
+            "project_title",
+            "use_case",
+            "raw_type",
+        )
+    )
+    has_phone = bool(str(lead.get("phone") or "").strip())
+    has_email = bool(str(lead.get("email") or "").strip())
+    has_website = bool(
+        str(lead.get("company_website") or lead.get("website") or "").strip()
+    )
+    has_evidence_link = bool(str(lead.get("search_url") or "").strip())
+    has_contact = has_phone or has_email
+    company_key = normalized_company_name(company)
+    concrete_company = bool(
+        len(company_key) >= 4
+        and not any(
+            word in company
+            for word in ("开发任务", "搜索任务", "检索入口", "待核验企业", "目标企业")
+        )
+    )
+    official = any(
+        word in evidence_text
+        for word in ("官方", "政府采购", "公共资源", "排污许可", "环评", "验收监测")
+    )
+    website_evidence = "企业官网" in evidence_text or "官网" in confidence
+    inferred_only = any(
+        word in evidence_text for word in ("官网行业推断", "官网工艺推断", "仅为行业推断", "待核验")
+    )
+    direct_terms = {
+        "upstream": ("液体氯化钙", "液钙", "副产", "石灰中和", "蒸氨母液", "氯醇法"),
+        "environmental": ("含氟废水", "废水氟化物", "氟离子", "氟化物（以f-计）", "明确确认"),
+        "procurement": ("采购", "招标", "询价", "中标", "成交", "液体氯化钙", "氯化钙"),
+        "competitor": ("液体氯化钙", "氯化钙溶液", "客户案例", "应用领域", "同行"),
+        "downstream": ("氯化钙", "融雪", "干燥剂", "钻井液", "水处理", "早强剂"),
+    }
+    explicit_match = any(
+        word in evidence_text.lower() for word in direct_terms.get(direction, ())
+    )
+    relevance_score = int(lead.get("relevance_score") or lead.get("score") or 0)
+
+    manually_confirmed = "手动新增" in source or "人工确认" in confidence
+
+    if not concrete_company or source in {"搜索任务", "开发任务"}:
+        grade = "D"
+    elif manually_confirmed:
+        grade = "A"
+    elif (official or website_evidence) and explicit_match and not inferred_only:
+        grade = "A"
+    elif (official or website_evidence) or (has_phone and relevance_score >= 42):
+        grade = "B"
+    else:
+        grade = "C"
+
+    reasons: list[str] = []
+    if official:
+        reasons.append("官方文件证据")
+    if manually_confirmed:
+        reasons.append("人工确认档案")
+    if website_evidence:
+        reasons.append("企业官网证据")
+    if explicit_match:
+        reasons.append("业务关键词直接命中")
+    if has_phone:
+        reasons.append("有公开电话")
+    elif has_email:
+        reasons.append("有公开邮箱")
+    if source == "高德 POI":
+        reasons.append("地图登记企业")
+
+    issues: list[str] = []
+    if not has_contact:
+        issues.append("缺少直接联系方式")
+    if not (official or website_evidence or manually_confirmed):
+        issues.append("缺少官网或官方文件佐证")
+    if not explicit_match:
+        issues.append("仅为行业推断，需确认实际工艺或用途")
+    elif inferred_only:
+        issues.append("官网内容仅支持推断，需确认实际工艺或排放")
+    if not concrete_company:
+        issues.append("不是可直接跟进的具体企业")
+
+    if grade == "A" and has_contact:
+        action = "优先联系，核实用量/产量、指标、现有渠道和装卸条件"
+    elif has_phone:
+        action = "先电话确认实际用途或生产工艺，确认后再进入报价"
+    elif official or website_evidence:
+        action = "打开证据原文补联系人，并核实公告或工艺是否仍有效"
+    elif concrete_company:
+        action = "先查企业官网和工商经营范围，补齐证据与联系电话"
+    else:
+        action = "仅作为检索入口，不计入优先销售名单"
+
+    labels = {
+        "A": "A级 已验证",
+        "B": "B级 优先核验",
+        "C": "C级 待补证据",
+        "D": "D级 检索任务",
+    }
+    return {
+        "quality_grade": grade,
+        "quality_label": labels[grade],
+        "quality_reasons": "、".join(reasons) or "基础行业匹配",
+        "quality_issues": "；".join(issues),
+        "recommended_action": action,
+        "actionable": bool(
+            grade in {"A", "B"} and (has_contact or has_website or has_evidence_link)
+        ),
+    }
+
+
+def prepare_lead_payload(lead: Lead | dict[str, Any]) -> dict[str, Any]:
+    payload = asdict(lead) if isinstance(lead, Lead) else dict(lead)
+    if not payload.get("relevance_score"):
+        payload["relevance_score"] = int(payload.get("score") or 0)
+    score, score_details = calculate_lead_score(payload)
+    payload["score"] = score
+    payload["score_details"] = score_details
+    payload.update(lead_quality_profile(payload))
+    return payload
+
+
+def prepare_lead_results(leads: list[Lead] | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared = [prepare_lead_payload(lead) for lead in leads]
+    return sorted(
+        prepared,
+        key=lambda item: (
+            {"A": 4, "B": 3, "C": 2, "D": 1}.get(item.get("quality_grade"), 0),
+            int(item.get("score") or 0),
+            bool(item.get("phone")),
+        ),
+        reverse=True,
+    )
+
+
+def lead_quality_summary(leads: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "gradeA": sum(lead.get("quality_grade") == "A" for lead in leads),
+        "gradeB": sum(lead.get("quality_grade") == "B" for lead in leads),
+        "actionable": sum(bool(lead.get("actionable")) for lead in leads),
+        "withPhone": sum(bool(lead.get("phone")) for lead in leads),
+        "needsContact": sum(not bool(lead.get("phone") or lead.get("email")) for lead in leads),
+    }
+
+
 def merged_lead_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(existing)
     for key, value in incoming.items():
         if value not in ("", None, [], {}):
             merged[key] = value
+    for key in ("phone", "email", "source"):
+        merged[key] = merge_contact_values(existing.get(key), incoming.get(key))
+    existing_relevance = int(existing.get("relevance_score") or 0)
+    incoming_relevance = int(
+        incoming.get("relevance_score") or incoming.get("score") or 0
+    )
+    merged["relevance_score"] = max(existing_relevance, incoming_relevance)
+    merged.update(lead_quality_profile(merged))
     return merged
 
 
@@ -1287,6 +1486,7 @@ def create_manual_lead(payload: dict[str, Any]) -> dict[str, Any]:
         "website": website,
         "company_website": company_website,
         "source": "手动新增档案",
+        "score": 42,
         "match_reason": clipped_text(payload, "matchReason", 500) or "手动新增公司档案",
         "use_case": clipped_text(payload, "useCase", 500),
         "pitch": clipped_text(payload, "pitch", 500) or "根据销售记录继续跟进",
@@ -1366,6 +1566,7 @@ def save_leads(
 ) -> dict[str, int]:
     created = 0
     updated = 0
+    skipped = 0
     timestamp = now_iso()
     with DATABASE_LOCK, database_connection() as connection:
         valid_monitor_id = monitor_id
@@ -1400,7 +1601,10 @@ def save_leads(
             """
         )
         for incoming in leads:
-            lead = dict(incoming)
+            lead = prepare_lead_payload(incoming)
+            if not normalized_company_name(lead.get("company")):
+                skipped += 1
+                continue
             if not lead.get("opportunity_role"):
                 lead["opportunity_role"] = (
                     "supplier"
@@ -1418,6 +1622,8 @@ def save_leads(
             merged = merged_lead_payload(existing_payload, lead)
             score, score_details = calculate_lead_score(merged)
             merged["score"] = score
+            merged["score_details"] = score_details
+            merged.update(lead_quality_profile(merged))
             if existing_row:
                 connection.execute(
                     """
@@ -1517,7 +1723,12 @@ def save_leads(
                         timestamp,
                     ),
                 )
-    return {"created": created, "updated": updated, "total": len(leads)}
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(leads),
+    }
 
 
 def lead_row_payload(row: sqlite3.Row) -> dict[str, Any]:
@@ -1544,6 +1755,9 @@ def lead_row_payload(row: sqlite3.Row) -> dict[str, Any]:
             "commercial_value": row["commercial_value"],
         }
     )
+    if not payload.get("relevance_score"):
+        payload["relevance_score"] = min(int(row["score"] or 0), 60)
+    payload.update(lead_quality_profile(payload))
     return payload
 
 
@@ -1921,8 +2135,6 @@ def lead_score(name: str, raw_type: str, base: int, has_phone: bool) -> tuple[in
     text = f"{name} {raw_type}"
     hits = [word for word in POSITIVE_WORDS if word in text]
     score = base + min(32, len(hits) * 6)
-    if has_phone:
-        score += 16
     if any(word in text for word in ["市政", "环卫", "公路", "高速", "道路养护"]):
         score += 10
     if any(word in text for word in ["厂家", "制造", "实业", "科技", "材料"]):
@@ -1939,8 +2151,6 @@ def upstream_lead_score(
     text = f"{name} {raw_type}"
     hits = [word for word in sector["indicators"] if word in text]
     score = int(sector["score"]) + min(30, len(hits) * 10)
-    if has_phone:
-        score += 12
     if any(word in text for word in ["生产", "制造", "冶炼", "材料", "资源", "工业"]):
         score += 8
     confidence = sector["confidence"]
@@ -1972,6 +2182,85 @@ def likely_upstream_company(name: str, raw_type: str) -> bool:
     return any(word in text for word in UPSTREAM_COMPANY_HINTS)
 
 
+def likely_downstream_company(name: str, raw_type: str) -> bool:
+    text = f"{name} {raw_type}"
+    retail_words = [
+        "商店",
+        "门市",
+        "销售部",
+        "服务部",
+        "专卖店",
+        "体验馆",
+        "住宅",
+        "生活服务",
+        "购物服务",
+        "道路名",
+        "门牌信息",
+    ]
+    business_words = [
+        "公司",
+        "集团",
+        "有限",
+        "股份",
+        "工厂",
+        "厂",
+        "水务",
+        "污水处理",
+        "公路养护",
+        "道路养护",
+        "环卫",
+        "油田",
+        "冷库",
+        "产业园",
+    ]
+    if any(word in text for word in retail_words):
+        return any(word in name for word in ("公司", "集团", "有限", "股份", "厂"))
+    return any(word in text for word in business_words) or any(
+        word in raw_type for word in ("公司企业", "工厂", "政府机构", "社会团体")
+    )
+
+
+def normalize_amap_city(value: str) -> str:
+    city = re.sub(r"\s+", "", str(value or "").strip())
+    for marker in ("特别行政区", "维吾尔自治区", "壮族自治区", "回族自治区", "自治区", "省"):
+        if marker in city:
+            remainder = city.split(marker, 1)[1]
+            if remainder:
+                return remainder
+    return city
+
+
+def normalized_region_text(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or ""))
+    return re.sub(
+        r"(特别行政区|维吾尔自治区|壮族自治区|回族自治区|自治区|省|市|地区|自治州|盟|区|县)$",
+        "",
+        text,
+    )
+
+
+def amap_region_matches(
+    requested_region: str,
+    province: str,
+    city: str,
+    district: str,
+) -> bool:
+    requested = normalized_region_text(requested_region)
+    requested_city = normalized_region_text(normalize_amap_city(requested_region))
+    province_value = normalized_region_text(province)
+    city_value = normalized_region_text(city)
+    district_value = normalized_region_text(district)
+    if requested_city and requested_city != requested:
+        return requested_city in {city_value, district_value} or any(
+            requested_city in value for value in (city_value, district_value) if value
+        )
+    return any(
+        requested == value or requested in value or value in requested
+        for value in (province_value, city_value, district_value)
+        if requested and value
+    )
+
+
 def amap_search(
     key: str,
     city: str,
@@ -1984,7 +2273,7 @@ def amap_search(
         {
             "key": key,
             "keywords": keyword,
-            "city": city,
+            "city": normalize_amap_city(city),
             "citylimit": "true",
             "offset": str(offset),
             "page": str(page),
@@ -2350,6 +2639,7 @@ def collect_amap_leads(
     exclude_suppliers: bool,
     strict_upstream: bool,
     progress_callback: Any = None,
+    precision_mode: bool = False,
 ) -> tuple[list[Lead], list[str]]:
     leads: list[Lead] = []
     errors: list[str] = []
@@ -2415,10 +2705,14 @@ def collect_amap_leads(
                 province = as_text(poi.get("pname"))
                 city_name = as_text(poi.get("cityname"))
                 district = as_text(poi.get("adname"))
+                if not amap_region_matches(region, province, city_name, district):
+                    continue
                 region_label = " ".join(part for part in [province, city_name, district] if part) or region
                 address = as_text(poi.get("address"))
                 phone = as_text(poi.get("tel")).replace(";", " / ")
                 raw_type = as_text(poi.get("type"))
+                if direction == "downstream" and precision_mode and not likely_downstream_company(name, raw_type):
+                    continue
                 if direction == "upstream":
                     upstream_text = f"{name} {raw_type}"
                     if exclude_suppliers and any(word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS):
@@ -4760,6 +5054,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     require_amap = bool(payload.get("requireAmap"))
     exclude_suppliers = bool(payload.get("excludeSuppliers", True))
     strict_upstream = bool(payload.get("strictUpstream", True))
+    collection_strategy = str(payload.get("collectionStrategy") or "balanced")
     used_fallback = False
 
     errors: list[str] = []
@@ -4779,8 +5074,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             bool(payload.get("competitorDeepScan", True)),
             progress_callback,
         )
+        prepared_leads = prepare_lead_results(leads)
         return {
-            "leads": [asdict(lead) for lead in leads],
+            "leads": prepared_leads,
             "errors": errors[:40],
             "meta": {
                 "count": len(leads),
@@ -4795,6 +5091,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "regions": regions,
                 "sectors": [item["name"] for item in sectors.values()],
                 "competitorSources": competitor_sources,
+                "qualitySummary": lead_quality_summary(prepared_leads),
                 "mode": "competitor",
             },
         }
@@ -4875,8 +5172,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                         f"{existing.match_reason}；官网补充：{lead.match_reason}"
                     )
         leads = sorted(company_deduped.values(), key=lambda item: item.score, reverse=True)
+        prepared_leads = prepare_lead_results(leads)
         return {
-            "leads": [asdict(lead) for lead in leads],
+            "leads": prepared_leads,
             "errors": errors[:40],
             "meta": {
                 "count": len(leads),
@@ -4890,6 +5188,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "regions": regions,
                 "sectors": [item["name"] for item in sectors.values()],
                 "environmentalSources": environmental_sources,
+                "qualitySummary": lead_quality_summary(prepared_leads),
                 "mode": "environmental",
             },
         }
@@ -5016,8 +5315,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                     0,
                     "官方平台暂未返回具体公告，已生成中国政府采购网/公共资源交易平台检索入口。",
                 )
+        prepared_leads = prepare_lead_results(leads)
         return {
-            "leads": [asdict(lead) for lead in leads],
+            "leads": prepared_leads,
             "errors": errors[:40],
             "meta": {
                 "count": len(leads),
@@ -5032,6 +5332,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "noticeTypes": [PROCUREMENT_NOTICE_TYPES[item] for item in notice_type_ids if item in PROCUREMENT_NOTICE_TYPES],
                 "procurementSources": procurement_sources,
                 "dateWindow": PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])[0],
+                "qualitySummary": lead_quality_summary(prepared_leads),
                 "mode": "procurement",
             },
         }
@@ -5050,6 +5351,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             exclude_suppliers,
             strict_upstream,
             progress_callback,
+            precision_mode=collection_strategy == "precision",
         )
         if direction == "upstream" and not leads and strict_upstream:
             relaxed_leads, relaxed_errors = collect_amap_leads(
@@ -5063,6 +5365,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 exclude_suppliers,
                 False,
                 progress_callback,
+                precision_mode=False,
             )
             if relaxed_leads:
                 leads = relaxed_leads
@@ -5077,8 +5380,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         used_fallback = True
 
     leads = sorted(leads, key=lambda item: item.score, reverse=True)
+    prepared_leads = prepare_lead_results(leads)
     return {
-        "leads": [asdict(lead) for lead in leads],
+        "leads": prepared_leads,
         "errors": errors[:40],
         "meta": {
             "count": len(leads),
@@ -5093,8 +5397,10 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "direction": direction,
             "excludeSuppliers": exclude_suppliers,
             "strictUpstream": strict_upstream,
+            "collectionStrategy": collection_strategy,
             "regions": regions,
             "sectors": [item["name"] for item in sectors.values()],
+            "qualitySummary": lead_quality_summary(prepared_leads),
             "mode": (
                 "task"
                 if used_fallback
@@ -5514,6 +5820,13 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
     output = io.StringIO()
     fieldnames = [
         "score",
+        "quality_grade",
+        "quality_label",
+        "quality_reasons",
+        "quality_issues",
+        "recommended_action",
+        "actionable",
+        "relevance_score",
         "company",
         "region",
         "sector",

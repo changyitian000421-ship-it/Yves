@@ -22,6 +22,7 @@ const state = {
   system: {},
   hasEnvAmapKey: false,
   tursoConfigured: false,
+  collectionStrategy: "precision",
 };
 
 const DIRECTION_LABELS = {
@@ -76,6 +77,76 @@ function setNotice(message, isError = false) {
   notice.classList.toggle("error", isError);
 }
 
+function selectedCollectionStrategy() {
+  return document.querySelector('input[name="collectionStrategy"]:checked')?.value || "precision";
+}
+
+function applyCollectionStrategy(strategy = selectedCollectionStrategy()) {
+  state.collectionStrategy = strategy;
+  const settings = {
+    precision: {
+      pages: 1,
+      fast: true,
+      onlyPhone: true,
+      strict: true,
+      note: "优先返回证据较强、可直接联系的企业。",
+    },
+    balanced: {
+      pages: 2,
+      fast: false,
+      onlyPhone: false,
+      strict: true,
+      note: "兼顾准确度和覆盖面，适合每周集中开发。",
+    },
+    coverage: {
+      pages: 3,
+      fast: false,
+      onlyPhone: false,
+      strict: false,
+      note: "扩大候选范围，结果中会保留更多待核验企业。",
+    },
+  }[strategy] || {};
+  if ($("#pages")) $("#pages").value = settings.pages || 1;
+  if ($("#fast-mode")) $("#fast-mode").checked = Boolean(settings.fast);
+  if ($("#only-phone")) {
+    $("#only-phone").checked = state.direction === "downstream" && Boolean(settings.onlyPhone);
+  }
+  if ($("#strict-upstream")) $("#strict-upstream").checked = Boolean(settings.strict);
+  if ($("#exclude-suppliers")) $("#exclude-suppliers").checked = strategy !== "coverage";
+  if ($("#strategy-note")) $("#strategy-note").textContent = settings.note || "";
+  if ($("#date-window") && state.direction === "procurement") {
+    $("#date-window").value = strategy === "coverage" ? "90d" : strategy === "balanced" ? "30d" : "10d";
+  }
+}
+
+function qualityFilterMatches(lead) {
+  const value = $("#quality-filter")?.value || "";
+  if (!value) return true;
+  if (value === "actionable") return Boolean(lead.actionable);
+  if (value === "AB") return ["A", "B"].includes(lead.quality_grade);
+  if (value === "needs-contact") return !lead.phone && !lead.email;
+  return lead.quality_grade === value;
+}
+
+function renderQualitySummary(leads) {
+  const panel = $("#quality-summary");
+  if (!panel) return;
+  const visible = ["collect", "database", "profiles"].includes(state.view) && leads.length;
+  panel.hidden = !visible;
+  if (!visible) return;
+  const gradeA = leads.filter((lead) => lead.quality_grade === "A").length;
+  const gradeB = leads.filter((lead) => lead.quality_grade === "B").length;
+  const actionable = leads.filter((lead) => lead.actionable).length;
+  const needsContact = leads.filter((lead) => !lead.phone && !lead.email).length;
+  panel.innerHTML = `
+    <strong>质量概览</strong>
+    <span><b>${gradeA}</b> A级已验证</span>
+    <span><b>${gradeB}</b> B级优先核验</span>
+    <span><b>${actionable}</b> 可立即跟进</span>
+    <span><b>${needsContact}</b> 待补联系方式</span>
+  `;
+}
+
 function renderSectors() {
   const container = $("#sector-list");
   const sectors = state.direction === "upstream"
@@ -118,6 +189,7 @@ function leadMatches(lead, query) {
     && $("#only-phone")?.checked
     && !lead.phone
   ) return false;
+  if (!qualityFilterMatches(lead)) return false;
   if (!query) return true;
   const haystack = [
     lead.company,
@@ -152,6 +224,11 @@ function leadMatches(lead, query) {
     lead.competitor_regions,
     lead.competitor_keywords,
     lead.competitor_channels,
+    lead.quality_grade,
+    lead.quality_label,
+    lead.quality_reasons,
+    lead.quality_issues,
+    lead.recommended_action,
   ]
     .join(" ")
     .toLowerCase();
@@ -230,14 +307,14 @@ function renderMetrics(leads) {
   const environmental = state.meta?.direction === "environmental" || state.direction === "environmental";
   const competitor = state.meta?.direction === "competitor" || state.direction === "competitor";
   $("#metric-count").textContent = leads.length;
-  $("#metric-hot").textContent = leads.filter((lead) => Number(lead.score) >= 70).length;
+  $("#metric-hot").textContent = leads.filter((lead) => ["A", "B"].includes(lead.quality_grade)).length;
   $("#metric-phone").textContent = competitor
     ? leads.filter((lead) => lead.company_website).length
     : environmental
     ? leads.filter((lead) => lead.poi_id).length
     : leads.filter((lead) => lead.phone).length;
   $("#metric-count-label").textContent = competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "线索数量";
-  $("#metric-hot-label").textContent = competitor ? "重点同行" : procurement ? "重点项目" : "高潜线索";
+  $("#metric-hot-label").textContent = competitor ? "重点同行" : procurement ? "重点项目" : "A/B级线索";
   $("#metric-phone-label").textContent = competitor ? "已定位官网" : environmental ? "证据记录" : "含电话";
   const modeLabels = {
     amap: "真实企业",
@@ -267,6 +344,7 @@ function renderLeads() {
     return leadMatches(lead, query);
   });
   renderMetrics(state.filtered);
+  renderQualitySummary(state.filtered);
 
   const tbody = $("#lead-body");
   if (!state.filtered.length) {
@@ -313,6 +391,9 @@ function renderLeads() {
       const confidence = lead.confidence
         ? `<span class="confidence confidence-${lead.confidence === "高" ? "high" : lead.confidence === "中" ? "medium" : "review"}">${escapeHtml(lead.confidence)}${lead.confidence.startsWith("官方") ? "" : "相关"}</span>`
         : "";
+      const qualityGrade = lead.quality_grade
+        ? `<span class="quality-badge quality-${escapeHtml(lead.quality_grade.toLowerCase())}" title="${escapeHtml(lead.quality_reasons || "")}">${escapeHtml(lead.quality_grade)}</span>`
+        : "";
       const scoreDetails = Object.entries(lead.score_details || {})
         .map(([key, value]) => `${key} ${value}`)
         .join(" · ");
@@ -342,7 +423,7 @@ function renderLeads() {
               : ""}
           </td>
           <td>
-            <span class="${scoreClass(Number(lead.score))}" title="${escapeHtml(scoreDetails)}">${escapeHtml(lead.score)}</span>
+            <div class="score-line"><span class="${scoreClass(Number(lead.score))}" title="${escapeHtml(scoreDetails)}">${escapeHtml(lead.score)}</span>${qualityGrade}</div>
             ${scoreDetails ? `<div class="score-breakdown">${escapeHtml(scoreDetails)}</div>` : ""}
           </td>
           <td>
@@ -448,6 +529,7 @@ function renderProfiles() {
   state.filtered = state.profileFiltered;
   renderProfileStatusBoard();
   renderMetrics(state.profileFiltered);
+  renderQualitySummary(state.profileFiltered);
 
   const list = $("#profile-list");
   if (!state.profileFiltered.length) {
@@ -720,6 +802,7 @@ async function switchView(view) {
   $(".table-shell").hidden = alerts || profiles || system;
   $(".filters").hidden = alerts || system;
   $("#notice").hidden = alerts || system;
+  $("#quality-summary").hidden = alerts || system;
   $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
   $("#progress-panel").hidden = alerts || system || !state.activeJobId;
   $("#quick-filters").hidden = database || profiles;
@@ -782,6 +865,7 @@ function buildPayload() {
     competitorSources: selectedValues("competitorSource"),
     competitorDeepScan: $("#competitor-deep-scan").checked,
     dateWindow: $("#date-window").value,
+    collectionStrategy: selectedCollectionStrategy(),
   };
 }
 
@@ -988,6 +1072,7 @@ function setDirection(direction) {
   $("#export-button").disabled = true;
   $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="9">选择地区和行业后开始采集。</td></tr>`;
   renderMetrics([]);
+  renderQualitySummary([]);
   setNotice(
     competitor
       ? "选择地区、产品方向和公开来源后，系统会生成同行画像及反向开发建议。"
@@ -999,6 +1084,7 @@ function setDirection(direction) {
         ? "选择监控主题、公告类型和时间范围后采集真实采购单位。"
         : "当前为下游买家采集模式。",
   );
+  applyCollectionStrategy();
 }
 
 async function runSearch(mode = "amap") {
@@ -1187,7 +1273,11 @@ function applySearchResult(data) {
   const persistence = data.persistence?.total
     ? ` 已存入线索库：新增 ${data.persistence.created || 0} 条，更新 ${data.persistence.updated || 0} 条。`
     : "";
-  setNotice(`${summary}${persistence}${warnings}`, Boolean(data.errors?.length && !state.leads.length));
+  const quality = data.meta?.qualitySummary || {};
+  const qualityText = state.leads.length
+    ? ` 其中 A/B 级 ${Number(quality.gradeA || 0) + Number(quality.gradeB || 0)} 条，可立即跟进 ${quality.actionable || 0} 条。`
+    : "";
+  setNotice(`${summary}${qualityText}${persistence}${warnings}`, Boolean(data.errors?.length && !state.leads.length));
   loadDashboard().catch(() => {});
 }
 
@@ -1229,6 +1319,10 @@ function showCompanyDetail(lead) {
   $("#detail-company").textContent = lead.company || (procurement ? "采购单位详情" : "企业详情");
   $("#detail-grid").innerHTML = [
     detailScoreItem(lead),
+    detailItem("质量等级", lead.quality_label),
+    detailItem("质量依据", lead.quality_reasons),
+    detailItem("待补信息", lead.quality_issues),
+    detailItem("建议下一步", lead.recommended_action),
     detailPhoneItem(lead.phone),
     detailItem("采购项目", procurement ? lead.project_title : ""),
     detailItem("公告类型", procurement ? lead.sector : ""),
@@ -1590,10 +1684,14 @@ function bindEvents() {
   $("#logout-button").addEventListener("click", logout);
   $("#filter").addEventListener("input", renderCurrentResults);
   $("#only-phone").addEventListener("change", renderCurrentResults);
+  $("#quality-filter").addEventListener("change", renderCurrentResults);
   $("#status-filter").addEventListener("change", renderCurrentResults);
   $("#direction-filter").addEventListener("change", renderCurrentResults);
   $$(".workspace-tabs button").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
+  });
+  $$("input[name='collectionStrategy']").forEach((input) => {
+    input.addEventListener("change", () => applyCollectionStrategy(input.value));
   });
   $$('input[name="direction"]').forEach((input) => {
     input.addEventListener("change", () => setDirection(input.value));

@@ -161,6 +161,46 @@ h1 {
   background: var(--accent);
 }
 
+.strategy-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.strategy-control label {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.strategy-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.strategy-control span {
+  display: grid;
+  place-items: center;
+  min-height: 40px;
+  padding: 7px 5px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.strategy-control label:last-child span {
+  border-right: 0;
+}
+
+.strategy-control input:checked + span {
+  color: #fff;
+  background: var(--accent);
+}
+
 .direction-note {
   padding: 10px 11px;
   border-left: 3px solid var(--accent);
@@ -439,6 +479,30 @@ h2 {
   border-left-color: var(--red);
 }
 
+.quality-summary {
+  display: flex;
+  gap: 10px 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border: 1px solid #b8d8d3;
+  border-radius: 8px;
+  color: #425466;
+  background: #f2faf8;
+  font-size: 13px;
+}
+
+.quality-summary strong {
+  color: var(--accent-dark);
+}
+
+.quality-summary b {
+  margin-right: 4px;
+  color: var(--ink);
+  font-size: 16px;
+}
+
 .bulk-toolbar {
   display: flex;
   gap: 10px;
@@ -642,6 +706,47 @@ tbody tr:hover {
 
 .score.low {
   background: #64748b;
+}
+
+.score-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.quality-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.quality-a {
+  border-color: #75c6a5;
+  color: #05603a;
+  background: #eaf8f1;
+}
+
+.quality-b {
+  border-color: #8eb9e8;
+  color: #174f8b;
+  background: #edf5fd;
+}
+
+.quality-c {
+  border-color: #e0bd72;
+  color: #7a4d08;
+  background: #fff8e6;
+}
+
+.quality-d {
+  border-color: #cbd2da;
+  color: #596579;
+  background: #f4f6f8;
 }
 
 .score-breakdown {

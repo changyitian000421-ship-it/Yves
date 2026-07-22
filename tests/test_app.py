@@ -58,6 +58,104 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(row["liquid_concentration"], "30%")
         self.assertGreaterEqual(row["score"], 20)
 
+    def test_repeated_collection_does_not_inflate_score(self):
+        lead = {
+            "company": "稳定评分水处理有限公司",
+            "direction": "downstream",
+            "region": "山东",
+            "sector": "水处理",
+            "source": "高德 POI",
+            "score": 48,
+            "phone": "0531-12345678",
+            "match_reason": "水处理药剂行业关键词命中",
+        }
+
+        app.save_leads([lead])
+        first = app.list_saved_leads({"q": "稳定评分"})[0]
+        app.save_leads([lead])
+        second = app.list_saved_leads({"q": "稳定评分"})[0]
+
+        self.assertEqual(first["score"], second["score"])
+        self.assertEqual(second["relevance_score"], 48)
+        self.assertEqual(second["quality_grade"], "B")
+
+    def test_repeated_sources_merge_contacts_and_upgrade_quality(self):
+        company = "多来源副产液钙有限公司"
+        app.save_leads(
+            [
+                {
+                    "company": company,
+                    "direction": "upstream",
+                    "source": "高德 POI",
+                    "score": 42,
+                    "phone": "0536-1111111",
+                    "match_reason": "化工生产企业",
+                }
+            ]
+        )
+        app.save_leads(
+            [
+                {
+                    "company": company,
+                    "direction": "upstream",
+                    "source": "官方环评公示",
+                    "score": 55,
+                    "phone": "0536-2222222",
+                    "match_reason": "环评明确副产液体氯化钙",
+                    "process_basis": "盐酸与石灰中和产生液体氯化钙",
+                    "search_url": "https://example.com/eia",
+                }
+            ]
+        )
+
+        lead = app.list_saved_leads({"q": "多来源副产"})[0]
+        self.assertIn("0536-1111111", lead["phone"])
+        self.assertIn("0536-2222222", lead["phone"])
+        self.assertIn("高德 POI", lead["source"])
+        self.assertIn("官方环评公示", lead["source"])
+        self.assertEqual(lead["quality_grade"], "A")
+        self.assertTrue(lead["actionable"])
+
+    def test_inferred_website_lead_is_not_marked_verified(self):
+        lead = app.prepare_lead_payload(
+            {
+                "company": "行业推断新能源有限公司",
+                "direction": "environmental",
+                "source": "企业官网",
+                "score": 58,
+                "confidence": "官网行业推断",
+                "match_reason": "新能源材料行业推断",
+                "process_basis": "行业可能产生含氟废水",
+            }
+        )
+
+        self.assertEqual(lead["quality_grade"], "B")
+        self.assertIn("需确认", lead["quality_issues"])
+
+    def test_amap_combined_province_city_is_normalized_and_enforced(self):
+        self.assertEqual(app.normalize_amap_city("山东省济宁市"), "济宁市")
+        self.assertTrue(
+            app.amap_region_matches("山东省济宁市", "山东省", "济宁市", "任城区")
+        )
+        self.assertFalse(
+            app.amap_region_matches("山东省济宁市", "陕西省", "西安市", "莲湖区")
+        )
+        self.assertTrue(app.amap_region_matches("山东", "山东省", "济南市", "历下区"))
+
+    def test_precision_mode_rejects_storefront_pois(self):
+        self.assertFalse(
+            app.likely_downstream_company(
+                "水处理化工药剂",
+                "购物服务;专卖店;专营店",
+            )
+        )
+        self.assertTrue(
+            app.likely_downstream_company(
+                "山东清源水处理有限公司",
+                "公司企业;公司;环保科技",
+            )
+        )
+
     def test_system_events_and_database_backup(self):
         app.log_system_event(
             "warning",

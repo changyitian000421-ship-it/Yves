@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=cloud-diagnostics-1" />
+    <link rel="stylesheet" href="/styles.css?v=precision-workflow-1" />
   </head>
   <body>
     <div class="app">
@@ -45,6 +45,25 @@
             <div id="direction-note" class="direction-note">
               查找可能采购氯化钙的下游企业。
             </div>
+          </section>
+
+          <section>
+            <div class="section-title">采集策略</div>
+            <div class="strategy-control" role="radiogroup" aria-label="采集策略">
+              <label>
+                <input type="radio" name="collectionStrategy" value="precision" checked />
+                <span>精准</span>
+              </label>
+              <label>
+                <input type="radio" name="collectionStrategy" value="balanced" />
+                <span>均衡</span>
+              </label>
+              <label>
+                <input type="radio" name="collectionStrategy" value="coverage" />
+                <span>广覆盖</span>
+              </label>
+            </div>
+            <div id="strategy-note" class="direction-note">优先返回证据较强、可直接联系的企业。</div>
           </section>
 
           <section>
@@ -277,6 +296,16 @@
             <button type="button" data-filter="水处理">水处理</button>
             <button type="button" data-filter="化工">化工贸易</button>
           </div>
+          <label class="field compact quality-filter-field">
+            <span>线索质量</span>
+            <select id="quality-filter">
+              <option value="">全部等级</option>
+              <option value="actionable">可立即跟进</option>
+              <option value="AB">A/B级</option>
+              <option value="A">仅A级</option>
+              <option value="needs-contact">待补联系方式</option>
+            </select>
+          </label>
           <div id="crm-filters" class="crm-filters" hidden>
             <label class="field compact">
               <span>销售状态</span>
@@ -307,6 +336,8 @@
         <section id="notice" class="notice">
           当前无采集任务。
         </section>
+
+        <section id="quality-summary" class="quality-summary" hidden aria-live="polite"></section>
 
         <section id="bulk-toolbar" class="bulk-toolbar" hidden>
           <strong>已选 <span id="selected-count">0</span> 条</strong>
@@ -678,6 +709,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=cloud-diagnostics-1"></script>
+    <script src="/app.js?v=precision-workflow-1"></script>
   </body>
 </html>
