@@ -8869,7 +8869,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             result["persistence"] = persist_search_result(result)
             for error in result.get("errors") or []:
                 log_system_event(
-                    "warning" if result.get("leads") else "error",
+                    collection_event_level(str(error), bool(result.get("leads"))),
                     "collection",
                     str(error),
                     source=str(
