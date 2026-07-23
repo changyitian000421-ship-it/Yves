@@ -13,6 +13,10 @@ services:
         sync: false
       - key: BAIDU_MAP_AK
         sync: false
+      - key: TIANDITU_TK
+        sync: false
+      - key: BAIDU_SEARCH_API_KEY
+        sync: false
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
@@ -29,3 +33,9 @@ services:
         value: "4"
       - key: BAIDU_MAP_WORKERS
         value: "4"
+      - key: TIANDITU_WORKERS
+        value: "4"
+      - key: BAIDU_SEARCH_DAILY_LIMIT
+        value: "45"
+      - key: BAIDU_SEARCH_CACHE_DAYS
+        value: "7"

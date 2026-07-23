@@ -9,7 +9,10 @@ APP_SUPPORT_DIR="$HOME/Library/Application Support/CalciumLeads"
 APP_SUPPORT_ENV="$APP_SUPPORT_DIR/local.env"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR" "$ROOT/data" "$APP_SUPPORT_DIR"
-chmod +x "$ROOT/scripts/start_local_service.sh" "$ROOT/scripts/repair_local_service.sh"
+chmod +x \
+  "$ROOT/scripts/start_local_service.sh" \
+  "$ROOT/scripts/repair_local_service.sh" \
+  "$ROOT/scripts/configure_baidu_search.sh"
 if [[ -f "$ROOT/data/local.env" && ! -f "$APP_SUPPORT_ENV" ]]; then
   cp "$ROOT/data/local.env" "$APP_SUPPORT_ENV"
   chmod 600 "$APP_SUPPORT_ENV"
@@ -35,6 +38,7 @@ set +a
 export DATA_DIR="\${DATA_DIR:-$ROOT/data}"
 export AMAP_WORKERS="\${AMAP_WORKERS:-4}"
 export BAIDU_MAP_WORKERS="\${BAIDU_MAP_WORKERS:-4}"
+export TIANDITU_WORKERS="\${TIANDITU_WORKERS:-4}"
 if [[ -z "\${APP_PASSWORD:-}" || -z "\${LOGIN_PHONES:-}" ]]; then
   echo "APP_PASSWORD or LOGIN_PHONES missing in $APP_SUPPORT_ENV" >&2
   exit 78

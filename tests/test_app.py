@@ -2,7 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 import os
+import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock, patch
 
 import app
@@ -145,7 +147,12 @@ class LiquidCalciumAppTests(unittest.TestCase):
     def test_health_status_reports_provider_presence_without_secret_values(self):
         with patch.dict(
             os.environ,
-            {"AMAP_KEY": "private-amap-key", "BAIDU_MAP_AK": "private-baidu-key"},
+            {
+                "AMAP_KEY": "private-amap-key",
+                "BAIDU_MAP_AK": "private-baidu-key",
+                "TIANDITU_TK": "private-tianditu-key",
+                "BAIDU_SEARCH_API_KEY": "private-search-key",
+            },
             clear=False,
         ):
             status = app.health_status()
@@ -153,8 +160,220 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(status["status"], "ok")
         self.assertTrue(status["mapProviders"]["amap"])
         self.assertTrue(status["mapProviders"]["baidu"])
+        self.assertTrue(status["mapProviders"]["tianditu"])
+        self.assertTrue(status["webSearchProviders"]["baiduQianfan"])
         self.assertNotIn("private-amap-key", str(status))
         self.assertNotIn("private-baidu-key", str(status))
+        self.assertNotIn("private-tianditu-key", str(status))
+        self.assertNotIn("private-search-key", str(status))
+
+    @patch("app.urlopen")
+    def test_qianfan_web_search_uses_bearer_auth_and_maps_references(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "request_id": "request-1",
+                "references": [
+                    {
+                        "id": 1,
+                        "type": "web",
+                        "title": "测试环保科技有限公司官网",
+                        "url": "https://example.com/about",
+                        "content": "公司从事工业废水处理并公开联系电话。",
+                        "date": "2026-07-20 10:00:00",
+                    },
+                    {
+                        "id": 2,
+                        "type": "image",
+                        "title": "跳过图片",
+                        "url": "https://example.com/image.jpg",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        results = app.qianfan_web_search(
+            "private-qianfan-key",
+            "山东 工业废水处理 企业 官网",
+            8,
+        )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.full_url, app.BAIDU_SEARCH_ENDPOINT)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer private-qianfan-key",
+        )
+        self.assertEqual(payload["search_source"], "baidu_search_v2")
+        self.assertEqual(payload["resource_type_filter"][0]["top_k"], 8)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["provider"], "百度千帆网页搜索")
+        self.assertEqual(results[0]["description"], "公司从事工业废水处理并公开联系电话。")
+
+    @patch("app.urlopen")
+    def test_qianfan_web_search_maps_site_operator_to_structured_filter(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = b'{"request_id":"request-2","references":[]}'
+        urlopen.return_value.__enter__.return_value = response
+
+        app.qianfan_web_search(
+            "private-qianfan-key",
+            "site:douyin.com 山东 液体氯化钙",
+            10,
+        )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(
+            payload["messages"][0]["content"],
+            "山东 液体氯化钙",
+        )
+        self.assertEqual(
+            payload["search_filter"]["match"]["site"],
+            ["douyin.com"],
+        )
+
+    @patch("app.qianfan_web_search")
+    def test_public_web_search_caches_qianfan_results(self, qianfan_search):
+        qianfan_search.return_value = [
+            {
+                "title": "缓存测试企业官网",
+                "url": "https://cache.example.com/",
+                "description": "液体氯化钙采购",
+                "date": "",
+                "website": "",
+                "provider": "百度千帆网页搜索",
+            }
+        ]
+        with patch.dict(
+            os.environ,
+            {"BAIDU_SEARCH_API_KEY": "private-search-key"},
+            clear=False,
+        ):
+            first, first_url = app.search_public_web("缓存测试企业 官网", 10)
+            second, second_url = app.search_public_web("缓存测试企业 官网", 10)
+
+        self.assertEqual(first, second)
+        self.assertIn("baidu.com/s", first_url)
+        self.assertEqual(first_url, second_url)
+        self.assertEqual(qianfan_search.call_count, 1)
+        self.assertEqual(app.qianfan_search_usage_today(), 1)
+
+    @patch("app.fetch_html")
+    @patch("app.qianfan_web_search", side_effect=RuntimeError("临时不可用"))
+    def test_public_web_search_falls_back_when_qianfan_fails(
+        self,
+        _qianfan_search,
+        fetch_html,
+    ):
+        fetch_html.return_value = """
+        <ul>
+          <li class="res-list">
+            <h3><a>回退企业官网</a></h3>
+            <a data-mdurl="https://fallback.example.com/"></a>
+            <p class="res-desc">公开联系电话 0531-12345678</p>
+          </li>
+        </ul>
+        """
+        with patch.dict(
+            os.environ,
+            {"BAIDU_SEARCH_API_KEY": "invalid-temporary-key"},
+            clear=False,
+        ):
+            results, query_url = app.search_public_web("回退企业 官网", 10)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["provider"], "360公开网页索引")
+        self.assertIn("so.com/s", query_url)
+
+    @patch("app.search_public_web")
+    def test_company_website_discovery_rejects_directory_and_accepts_brand_site(
+        self,
+        public_search,
+    ):
+        public_search.return_value = (
+            [
+                {
+                    "title": "山东东岳化工有限公司",
+                    "description": "企业信息和产品黄页",
+                    "url": "https://www.huangye88.com/company/example/",
+                },
+                {
+                    "title": "东岳氟硅科技集团有限公司",
+                    "description": "产品中心、公司简介和联系我们",
+                    "url": "https://www.dongyuechem.com/about/index.html",
+                },
+            ],
+            "https://www.baidu.com/s?wd=test",
+        )
+
+        website = app.discover_company_website("山东东岳化工有限公司")
+
+        self.assertEqual(website, "https://www.dongyuechem.com/")
+
+    @patch("app.urlopen")
+    def test_tianditu_search_uses_admin_region_and_zero_based_start(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = (
+            b'{"resultType":1,"count":0,"pois":[],'
+            b'"status":{"infocode":1000,"cndesc":"OK"}}'
+        )
+        urlopen.return_value.__enter__.return_value = response
+
+        result = app.tianditu_search("test-tk", "山东省济南市", "水处理公司", 2)
+
+        request = urlopen.call_args.args[0]
+        params = parse_qs(urlparse(request.full_url).query)
+        post_data = json.loads(params["postStr"][0])
+        self.assertEqual(post_data["queryType"], 12)
+        self.assertEqual(post_data["specify"], "山东省济南市")
+        self.assertEqual(post_data["start"], 20)
+        self.assertEqual(post_data["show"], 2)
+        self.assertEqual(params["tk"], ["test-tk"])
+        self.assertEqual(result["status"]["infocode"], 1000)
+
+    @patch("app.tianditu_search")
+    def test_tianditu_collection_maps_company_phone_and_location(self, search):
+        search.return_value = {
+            "resultType": 1,
+            "status": {"infocode": 1000, "cndesc": "OK"},
+            "pois": [
+                {
+                    "hotPointID": "tdt-001",
+                    "name": "济南工业水处理有限公司",
+                    "province": "山东省",
+                    "city": "济南市",
+                    "county": "历城区",
+                    "address": "工业北路1号",
+                    "phone": "0531-88888888",
+                    "lonlat": "117.1,36.7",
+                    "typeName": "公司企业",
+                }
+            ],
+        }
+
+        leads, errors = app.collect_tianditu_leads(
+            "test-tk",
+            ["山东省济南市"],
+            {"water": app.SECTOR_LIBRARY["water"]},
+            [],
+            1,
+            1,
+            "downstream",
+            True,
+            True,
+            precision_mode=True,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].source, "天地图 POI")
+        self.assertEqual(leads[0].phone, "0531-88888888")
+        self.assertEqual(leads[0].poi_id, "tdt-001")
+        self.assertEqual(leads[0].location, "117.1,36.7")
 
     @patch("app.urlopen")
     def test_baidu_map_search_uses_v3_region_and_zero_based_page(self, urlopen):
@@ -282,6 +501,46 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertIn("地点检索", app.baidu_map_error_message(240, "服务未开通"))
         self.assertIn("额度", app.baidu_map_error_message(302, "配额不足"))
 
+    @patch("app.collect_tianditu_leads")
+    def test_collect_leads_can_run_with_only_tianditu(self, collect_tianditu):
+        collect_tianditu.return_value = (
+            [
+                app.Lead(
+                    company="天地图单源买家有限公司",
+                    region="山东",
+                    sector="工业水处理",
+                    source="天地图 POI",
+                    score=50,
+                    phone="0531-55555555",
+                )
+            ],
+            [],
+        )
+
+        result = app.collect_leads(
+            {
+                "direction": "downstream",
+                "regions": ["山东"],
+                "sectors": ["water"],
+                "tiandituTk": "test-tk",
+                "disableAmap": True,
+                "disableBaiduMap": True,
+                "pages": 1,
+                "fastMode": True,
+                "requireMap": True,
+            }
+        )
+
+        self.assertEqual(result["meta"]["mode"], "tianditu")
+        self.assertEqual(result["meta"]["mapSources"], ["天地图"])
+        self.assertEqual(result["meta"]["companyCount"], 1)
+        self.assertEqual(result["leads"][0]["company"], "天地图单源买家有限公司")
+
+    def test_tianditu_error_messages_are_actionable(self):
+        self.assertIn("参数", app.tianditu_error_message(2001, "Parameter Invalid"))
+        self.assertIn("分页", app.tianditu_error_message(2007, "count over"))
+        self.assertIn("暂时异常", app.tianditu_error_message(3000, "Server error"))
+
     @patch("app.discover_company_website", return_value="")
     @patch("app.baidu_map_search")
     def test_company_website_discovery_accepts_baidu_without_amap(
@@ -307,6 +566,7 @@ class LiquidCalciumAppTests(unittest.TestCase):
         leads, errors, requests = app.collect_company_website_notices(
             "",
             "test-ak",
+            "",
             ["山东"],
             {"water": app.PROCUREMENT_SECTOR_LIBRARY["water_treatment"]},
             [],
@@ -318,6 +578,45 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertGreater(requests, 0)
         self.assertTrue(baidu_search.called)
+
+    @patch("app.discover_company_website", return_value="")
+    @patch("app.tianditu_search")
+    def test_company_website_discovery_accepts_tianditu_only(
+        self,
+        tianditu_search,
+        _discover_website,
+    ):
+        tianditu_search.return_value = {
+            "resultType": 1,
+            "status": {"infocode": 1000, "cndesc": "OK"},
+            "pois": [
+                {
+                    "name": "天地图候选水务有限公司",
+                    "province": "山东省",
+                    "city": "济南市",
+                    "county": "历城区",
+                    "address": "工业路3号",
+                    "phone": "0531-55556666",
+                    "typeName": "公司企业",
+                }
+            ],
+        }
+
+        leads, errors, requests = app.collect_company_website_notices(
+            "",
+            "",
+            "test-tk",
+            ["山东"],
+            {"water": app.PROCUREMENT_SECTOR_LIBRARY["water_treatment"]},
+            [],
+            ["purchase"],
+            "10d",
+        )
+
+        self.assertEqual(leads, [])
+        self.assertEqual(errors, [])
+        self.assertGreater(requests, 0)
+        self.assertTrue(tianditu_search.called)
 
     def test_precision_mode_rejects_storefront_pois(self):
         self.assertFalse(

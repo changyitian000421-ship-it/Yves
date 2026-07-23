@@ -24,6 +24,8 @@ const state = {
   system: {},
   hasEnvAmapKey: false,
   hasEnvBaiduMapAk: false,
+  hasEnvTiandituTk: false,
+  hasEnvBaiduSearchApiKey: false,
   tursoConfigured: false,
   collectionStrategy: "precision",
 };
@@ -485,7 +487,8 @@ function renderMetrics(leads) {
   const modeLabels = {
     amap: "真实企业",
     baidu: "真实企业",
-    maps: "地图双源",
+    tianditu: "真实企业",
+    maps: "地图多源",
     task: "开发任务",
     need_key: "缺少 Key",
     procurement: "招采监控",
@@ -493,7 +496,7 @@ function renderMetrics(leads) {
     competitor: "竞品情报",
     social: "社媒公开索引",
   };
-  const mode = state.meta?.direction === "upstream" && ["amap", "baidu", "maps"].includes(state.meta?.mode)
+  const mode = state.meta?.direction === "upstream" && ["amap", "baidu", "tianditu", "maps"].includes(state.meta?.mode)
     ? "上游副产"
     : state.leads.length || state.meta?.mode
       ? modeLabels[state.meta?.mode] || "待开始"
@@ -653,15 +656,18 @@ async function fetchConfig() {
   state.regionPresets = config.regionPresets || {};
   state.hasEnvAmapKey = Boolean(config.hasEnvAmapKey);
   state.hasEnvBaiduMapAk = Boolean(config.hasEnvBaiduMapAk);
+  state.hasEnvTiandituTk = Boolean(config.hasEnvTiandituTk);
+  state.hasEnvBaiduSearchApiKey = Boolean(config.hasEnvBaiduSearchApiKey);
   state.tursoConfigured = Boolean(config.tursoConfigured);
   renderSectors();
   const mapSources = [
     state.hasEnvAmapKey ? "高德" : "",
     state.hasEnvBaiduMapAk ? "百度地图" : "",
+    state.hasEnvTiandituTk ? "天地图" : "",
   ].filter(Boolean);
   $("#api-status").textContent = mapSources.length
     ? `企业采集服务已启用：${mapSources.join(" + ")}`
-    : "企业采集服务未配置：请填写 AMAP_KEY 或 BAIDU_MAP_AK";
+    : "企业采集服务未配置：请填写 AMAP_KEY、BAIDU_MAP_AK 或 TIANDITU_TK";
   $("#api-status").classList.toggle("error", !mapSources.length);
 }
 
@@ -928,6 +934,13 @@ function renderSystem() {
     ["数据库模式", databaseMode],
     ["高德采集", data.amapConfigured ? "已配置" : "未配置"],
     ["百度地图采集", data.baiduMapConfigured ? "已配置" : "未配置"],
+    ["天地图采集", data.tiandituConfigured ? "已配置" : "未配置"],
+    [
+      "百度千帆网页搜索",
+      data.baiduSearchConfigured
+        ? `已配置 · 今日 ${data.baiduSearchUsageToday || 0}/${data.baiduSearchDailyLimit || 45}`
+        : "未配置",
+    ],
     ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
   ].map(([label, value]) => `
     <div><span>${escapeHtml(value)}</span><p>${escapeHtml(label)}</p></div>
@@ -1341,8 +1354,9 @@ async function runSearch(mode = "amap") {
     && !["procurement", "environmental", "competitor", "social"].includes(state.direction)
     && !state.hasEnvAmapKey
     && !state.hasEnvBaiduMapAk
+    && !state.hasEnvTiandituTk
   ) {
-    setNotice("企业地图采集尚未配置。请在本地或 Render Environment 添加 AMAP_KEY 或 BAIDU_MAP_AK。", true);
+    setNotice("企业地图采集尚未配置。请添加 AMAP_KEY、BAIDU_MAP_AK 或 TIANDITU_TK。", true);
     return;
   }
   button.disabled = true;
@@ -1366,13 +1380,16 @@ async function runSearch(mode = "amap") {
   if (["procurement", "environmental", "competitor", "social"].includes(state.direction)) {
     payload.amapKey = "";
     payload.baiduMapAk = "";
+    payload.tiandituTk = "";
     payload.requireMap = false;
   } else if (mode === "task") {
     payload.amapKey = "";
     payload.baiduMapAk = "";
+    payload.tiandituTk = "";
     payload.requireMap = false;
     payload.disableAmap = true;
     payload.disableBaiduMap = true;
+    payload.disableTianditu = true;
   } else {
     payload.requireMap = true;
   }
@@ -1489,7 +1506,7 @@ function applySearchResult(data) {
   const warnings = data.errors?.length ? ` ${data.errors[0]}` : "";
   const realCount = data.meta?.companyCount || 0;
   const phoneCount = data.meta?.phoneCount || 0;
-  const summary = ["amap", "baidu", "maps"].includes(data.meta?.mode)
+  const summary = ["amap", "baidu", "tianditu", "maps"].includes(data.meta?.mode)
     ? data.meta?.direction === "upstream"
       ? `已通过${(data.meta?.mapSources || []).join("、") || "地图服务"}发现 ${realCount} 家可能副产液体氯化钙的企业，其中 ${phoneCount} 家有电话；请按相关度核实工艺。`
       : `已通过${(data.meta?.mapSources || []).join("、") || "地图服务"}采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`

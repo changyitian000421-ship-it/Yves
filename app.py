@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import certifi
@@ -94,6 +94,17 @@ AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
 BAIDU_MAP_WORKERS = max(1, min(int(os.getenv("BAIDU_MAP_WORKERS", "4")), 8))
 BAIDU_MAP_RETRY_CODES = {401}
+TIANDITU_WORKERS = max(1, min(int(os.getenv("TIANDITU_WORKERS", "4")), 8))
+TIANDITU_RETRY_CODES = {3000}
+BAIDU_SEARCH_ENDPOINT = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+BAIDU_SEARCH_CACHE_DAYS = max(
+    1,
+    min(int(os.getenv("BAIDU_SEARCH_CACHE_DAYS", "7")), 30),
+)
+BAIDU_SEARCH_DAILY_LIMIT = max(
+    1,
+    min(int(os.getenv("BAIDU_SEARCH_DAILY_LIMIT", "45")), 500),
+)
 SEARCH_JOBS: dict[str, dict[str, Any]] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_TTL = 60 * 60
@@ -108,7 +119,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v8.1-baidu-health"
+APP_VERSION = "liquid-calcium-ops-v10.1-qianfan-verified"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1187,6 +1198,25 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_activity_created
                 ON activity_log(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS web_search_cache (
+                cache_key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                query TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                result_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_web_search_cache_expiry
+                ON web_search_cache(expires_at);
+
+            CREATE TABLE IF NOT EXISTS web_search_usage (
+                provider TEXT NOT NULL,
+                usage_date TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (provider, usage_date)
+            );
             """
         )
         existing_columns = {
@@ -2180,6 +2210,10 @@ def system_overview() -> dict[str, Any]:
         "tursoError": TURSO_RUNTIME_ERROR,
         "amapConfigured": bool(os.getenv("AMAP_KEY")),
         "baiduMapConfigured": bool(os.getenv("BAIDU_MAP_AK")),
+        "tiandituConfigured": bool(os.getenv("TIANDITU_TK")),
+        "baiduSearchConfigured": bool(baidu_search_api_key()),
+        "baiduSearchUsageToday": qianfan_search_usage_today(),
+        "baiduSearchDailyLimit": BAIDU_SEARCH_DAILY_LIMIT,
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
         "events": [
             {
@@ -2225,6 +2259,10 @@ def health_status() -> dict[str, Any]:
         "mapProviders": {
             "amap": bool(os.getenv("AMAP_KEY")),
             "baidu": bool(os.getenv("BAIDU_MAP_AK")),
+            "tianditu": bool(os.getenv("TIANDITU_TK")),
+        },
+        "webSearchProviders": {
+            "baiduQianfan": bool(baidu_search_api_key()),
         },
     }
 
@@ -2662,6 +2700,93 @@ def baidu_map_search(
     )
 
 
+def tianditu_infocode(data: dict[str, Any]) -> int:
+    status = data.get("status")
+    if isinstance(status, dict):
+        value = status.get("infocode")
+    elif isinstance(status, list) and status and isinstance(status[0], dict):
+        value = status[0].get("infocode")
+    else:
+        value = data.get("infocode")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1000 if data.get("resultType") is not None or "pois" in data else 0
+
+
+def tianditu_error_message(code: int, message: str) -> str:
+    messages = {
+        2001: "天地图搜索参数无效",
+        2002: "天地图搜索参数格式错误",
+        2003: "天地图搜索缺少必填参数",
+        2004: "天地图搜索参数值不受支持",
+        2007: "天地图搜索分页范围或返回数量超限",
+        3000: "天地图搜索服务暂时异常",
+        3001: "天地图未找到匹配数据",
+    }
+    detail = messages.get(code, f"天地图 API 返回错误 {code}")
+    return f"{detail}：{message}" if message else detail
+
+
+def tianditu_search(
+    tk: str,
+    region: str,
+    keyword: str,
+    page: int,
+    count: int = 20,
+    timeout: int = 12,
+) -> dict[str, Any]:
+    page_size = max(1, min(count, 100))
+    post_data = {
+        "keyWord": keyword,
+        "specify": region,
+        "queryType": 12,
+        "start": max(0, page - 1) * page_size,
+        "count": page_size,
+        "show": 2,
+    }
+    query = urlencode(
+        {
+            "postStr": json.dumps(
+                post_data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "type": "query",
+            "tk": tk,
+        }
+    )
+    url = f"https://api.tianditu.gov.cn/v2/search?{query}"
+    req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
+    data: dict[str, Any] = {}
+    for attempt in range(5):
+        with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        code = tianditu_infocode(data)
+        if code not in TIANDITU_RETRY_CODES:
+            if code not in {1000, 3001}:
+                status = data.get("status")
+                message = ""
+                if isinstance(status, dict):
+                    message = str(status.get("cndesc") or "")
+                elif isinstance(status, list) and status and isinstance(status[0], dict):
+                    message = str(status[0].get("cndesc") or "")
+                raise RuntimeError(tianditu_error_message(code, message))
+            return data
+        time.sleep((0.65 * (2**attempt)) + random.uniform(0.1, 0.55))
+    raise RuntimeError(tianditu_error_message(tianditu_infocode(data), "请稍后重试"))
+
+
+def tianditu_pois(data: dict[str, Any]) -> list[dict[str, Any]]:
+    pois = data.get("pois") or []
+    if isinstance(pois, str):
+        try:
+            pois = json.loads(pois)
+        except json.JSONDecodeError:
+            return []
+    return [poi for poi in pois if isinstance(poi, dict)] if isinstance(pois, list) else []
+
+
 def build_search_links(company_type: str, region: str, keyword: str) -> dict[str, str]:
     query = quote(f"{region} {keyword} {company_type}")
     company_query = quote(company_type)
@@ -2669,6 +2794,7 @@ def build_search_links(company_type: str, region: str, keyword: str) -> dict[str
         "baidu": f"https://www.baidu.com/s?wd={query}",
         "baidu_map": f"https://map.baidu.com/search/{quote(company_type)}",
         "amap": f"https://www.amap.com/search?query={query}",
+        "tianditu": "https://map.tianditu.gov.cn/",
         "ccgp": f"https://search.ccgp.gov.cn/bxsearch?searchtype=1&kw={quote(keyword)}",
         "qcc": f"https://www.qcc.com/web/search?key={company_query}",
     }
@@ -3313,6 +3439,161 @@ def collect_baidu_map_leads(
                     len(leads),
                     len([lead for lead in leads if lead.phone]),
                     f"百度地图 · {region} · {keyword} · 第{page}页",
+                )
+    return leads, errors
+
+
+def collect_tianditu_leads(
+    tianditu_tk: str,
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    pages: int,
+    keyword_limit: int,
+    direction: str,
+    exclude_suppliers: bool,
+    strict_upstream: bool,
+    progress_callback: Any = None,
+    precision_mode: bool = False,
+) -> tuple[list[Lead], list[str]]:
+    leads: list[Lead] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    pages = max(1, min(pages, 10))
+    jobs: list[tuple[str, dict[str, Any], str, int]] = []
+    for region in regions:
+        for sector in sectors.values():
+            keywords = list(sector["keywords"])
+            for custom in custom_keywords:
+                custom = custom.strip()
+                if custom and custom not in keywords:
+                    keywords.insert(0, custom)
+            keywords = list(dict.fromkeys(keywords))[:keyword_limit]
+            for keyword in keywords:
+                for page in range(1, pages + 1):
+                    jobs.append((region, sector, keyword, page))
+
+    with ThreadPoolExecutor(max_workers=TIANDITU_WORKERS) as executor:
+        future_jobs = {
+            executor.submit(tianditu_search, tianditu_tk, region, keyword, page): (
+                region,
+                sector,
+                keyword,
+                page,
+            )
+            for region, sector, keyword, page in jobs
+        }
+        completed = 0
+        total = len(jobs)
+        if progress_callback:
+            progress_callback(completed, total, 0, 0, "正在连接天地图数据服务")
+        for future in as_completed(future_jobs):
+            region, sector, keyword, page = future_jobs[future]
+            try:
+                data = future.result()
+            except Exception as exc:  # noqa: BLE001 - preserve other provider results.
+                errors.append(f"天地图 {region}/{keyword}/第{page}页：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(leads),
+                        len([lead for lead in leads if lead.phone]),
+                        f"天地图 · {region} · {keyword} · 第{page}页",
+                    )
+                continue
+
+            for poi in tianditu_pois(data):
+                name = str(poi.get("name") or "").strip()
+                if not name:
+                    continue
+                province = as_text(poi.get("province"))
+                city_name = as_text(poi.get("city"))
+                district = as_text(poi.get("county"))
+                if not amap_region_matches(region, province, city_name, district):
+                    continue
+                region_label = (
+                    " ".join(part for part in [province, city_name, district] if part)
+                    or region
+                )
+                address = as_text(poi.get("address"))
+                phone = as_text(poi.get("phone")).replace(";", " / ")
+                raw_type = as_text(poi.get("typeName") or poi.get("typeCode"))
+                if direction == "downstream" and precision_mode and not likely_downstream_company(
+                    name, raw_type
+                ):
+                    continue
+                if direction == "upstream":
+                    upstream_text = f"{name} {raw_type}"
+                    if exclude_suppliers and any(
+                        word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS
+                    ):
+                        continue
+                    if not likely_upstream_company(name, raw_type):
+                        continue
+                    allowed, strong_match = upstream_match_quality(name, raw_type, sector)
+                    if not allowed or (strict_upstream and not strong_match):
+                        continue
+                poi_id = as_text(poi.get("hotPointID"))
+                location = as_text(poi.get("lonlat"))
+                alias = as_text(poi.get("ename"))
+                dedupe_key = f"{normalized_company_name(name)}|{address}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                if direction == "upstream":
+                    score, reason, confidence = upstream_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                else:
+                    score, reason = lead_score(
+                        name,
+                        raw_type,
+                        int(sector["score"]),
+                        bool(phone),
+                    )
+                    confidence = ""
+                links = build_search_links(name, region, keyword)
+                leads.append(
+                    Lead(
+                        company=name,
+                        region=region_label,
+                        sector=sector["name"],
+                        source="天地图 POI",
+                        score=score,
+                        phone=phone,
+                        address=address,
+                        website=links["baidu"],
+                        use_case=sector.get("uses") or sector.get("process", ""),
+                        pitch=sector["pitch"],
+                        match_reason=(
+                            f"{keyword}；工艺线索：{reason}"
+                            if direction == "upstream"
+                            else f"{keyword}；{reason}"
+                        ),
+                        search_url=links["tianditu"],
+                        raw_type=raw_type,
+                        qcc_url=links["qcc"],
+                        alias=alias,
+                        poi_id=poi_id,
+                        location=location,
+                        direction=direction,
+                        process_basis=sector.get("process", ""),
+                        confidence=confidence,
+                    )
+                )
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    total,
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    f"天地图 · {region} · {keyword} · 第{page}页",
                 )
     return leads, errors
 
@@ -4401,6 +4682,264 @@ def indexed_fluoride_permit_leads(
     return leads
 
 
+def baidu_search_api_key() -> str:
+    return str(
+        os.getenv("BAIDU_SEARCH_API_KEY")
+        or os.getenv("QIANFAN_API_KEY")
+        or ""
+    ).strip()
+
+
+def truncate_baidu_search_query(value: str, limit: int = 72) -> str:
+    """Keep queries within Baidu's one-byte ASCII/two-byte CJK search limit."""
+    compact = re.sub(r"\s+", " ", value or "").strip()
+    result: list[str] = []
+    weight = 0
+    for character in compact:
+        character_weight = 1 if ord(character) < 128 else 2
+        if weight + character_weight > limit:
+            break
+        result.append(character)
+        weight += character_weight
+    return "".join(result).strip()
+
+
+def split_search_site_filters(query: str) -> tuple[str, list[str]]:
+    sites = list(
+        dict.fromkeys(
+            match.lower().strip(".")
+            for match in re.findall(
+                r"(?:^|\s)site:([A-Za-z0-9.-]+)",
+                query or "",
+                flags=re.I,
+            )
+            if match.strip(".")
+        )
+    )
+    cleaned = re.sub(
+        r"(?:^|\s)site:[A-Za-z0-9.-]+",
+        " ",
+        query or "",
+        flags=re.I,
+    )
+    return truncate_baidu_search_query(cleaned), sites[:10]
+
+
+def qianfan_web_search(
+    api_key: str,
+    query: str,
+    top_k: int = 12,
+    sites: list[str] | None = None,
+) -> list[dict[str, str]]:
+    normalized_query, parsed_sites = split_search_site_filters(query)
+    selected_sites = list(
+        dict.fromkeys(
+            site.lower().strip(".")
+            for site in [*(sites or []), *parsed_sites]
+            if site.strip(".")
+        )
+    )[:10]
+    if not api_key:
+        raise RuntimeError("未配置 BAIDU_SEARCH_API_KEY")
+    if not normalized_query:
+        return []
+    body = {
+        "messages": [{"role": "user", "content": normalized_query}],
+        "search_source": "baidu_search_v2",
+        "resource_type_filter": [
+            {"type": "web", "top_k": max(1, min(int(top_k), 50))}
+        ],
+    }
+    if selected_sites:
+        body["search_filter"] = {"match": {"site": selected_sites}}
+    bearer = f"Bearer {api_key}"
+    request = Request(
+        BAIDU_SEARCH_ENDPOINT,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "User-Agent": "CalciumLeads/1.0",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": bearer,
+            "X-Appbuilder-Authorization": bearer,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(
+            request,
+            timeout=20,
+            context=DEFAULT_SSL_CONTEXT,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(
+            f"百度千帆搜索 HTTP {exc.code}：{detail or exc.reason}"
+        ) from exc
+
+    code = payload.get("code")
+    if code not in (None, "", 0, "0"):
+        raise RuntimeError(
+            f"百度千帆搜索错误 {code}：{payload.get('message') or '未知错误'}"
+        )
+    references = payload.get("references")
+    if not isinstance(references, list):
+        return []
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for reference in references:
+        if not isinstance(reference, dict) or reference.get("type", "web") != "web":
+            continue
+        url = str(reference.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append(
+            {
+                "title": str(
+                    reference.get("title")
+                    or reference.get("web_anchor")
+                    or ""
+                ).strip(),
+                "url": url,
+                "description": str(
+                    reference.get("snippet")
+                    or reference.get("content")
+                    or ""
+                ).strip(),
+                "date": str(reference.get("date") or "").strip(),
+                "website": str(reference.get("website") or "").strip(),
+                "provider": "百度千帆网页搜索",
+            }
+        )
+    return results
+
+
+def web_search_cache_key(query: str, top_k: int) -> str:
+    normalized_query, sites = split_search_site_filters(query)
+    value = json.dumps(
+        {
+            "provider": "baidu_qianfan",
+            "schema": "site-filter-v1",
+            "query": normalized_query,
+            "sites": sites,
+            "topK": max(1, min(int(top_k), 50)),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def cached_web_search(cache_key: str) -> list[dict[str, str]] | None:
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with DATABASE_LOCK, database_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT payload, expires_at
+                FROM web_search_cache
+                WHERE cache_key = ?
+                """,
+                (cache_key,),
+            ).fetchone()
+            if not row:
+                return None
+            if str(row["expires_at"]) <= now:
+                connection.execute(
+                    "DELETE FROM web_search_cache WHERE cache_key = ?",
+                    (cache_key,),
+                )
+                return None
+            payload = json.loads(row["payload"] or "[]")
+            return payload if isinstance(payload, list) else None
+    except Exception as exc:  # noqa: BLE001 - cache failure must not stop collection.
+        print(f"WARNING: web search cache read failed: {exc}", flush=True)
+        return None
+
+
+def store_web_search_cache(
+    cache_key: str,
+    query: str,
+    results: list[dict[str, str]],
+) -> None:
+    now = datetime.now()
+    try:
+        with DATABASE_LOCK, database_connection() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO web_search_cache
+                    (cache_key, provider, query, payload, result_count,
+                     created_at, expires_at)
+                VALUES (?, 'baidu_qianfan', ?, ?, ?, ?, ?)
+                """,
+                (
+                    cache_key,
+                    truncate_baidu_search_query(query),
+                    json.dumps(results, ensure_ascii=False),
+                    len(results),
+                    now.isoformat(timespec="seconds"),
+                    (now + timedelta(days=BAIDU_SEARCH_CACHE_DAYS)).isoformat(
+                        timespec="seconds"
+                    ),
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001 - cache failure must not stop collection.
+        print(f"WARNING: web search cache write failed: {exc}", flush=True)
+
+
+def reserve_qianfan_search_request() -> None:
+    usage_date = date.today().isoformat()
+    with DATABASE_LOCK, database_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT request_count
+            FROM web_search_usage
+            WHERE provider = 'baidu_qianfan' AND usage_date = ?
+            """,
+            (usage_date,),
+        ).fetchone()
+        request_count = int(row["request_count"]) if row else 0
+        if request_count >= BAIDU_SEARCH_DAILY_LIMIT:
+            raise RuntimeError(
+                f"百度千帆搜索已达到本地每日保护上限 "
+                f"{BAIDU_SEARCH_DAILY_LIMIT} 次"
+            )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO web_search_usage
+                (provider, usage_date, request_count)
+            VALUES ('baidu_qianfan', ?, 0)
+            """,
+            (usage_date,),
+        )
+        connection.execute(
+            """
+            UPDATE web_search_usage
+            SET request_count = request_count + 1
+            WHERE provider = 'baidu_qianfan' AND usage_date = ?
+            """,
+            (usage_date,),
+        )
+
+
+def qianfan_search_usage_today() -> int:
+    try:
+        with DATABASE_LOCK, database_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT request_count
+                FROM web_search_usage
+                WHERE provider = 'baidu_qianfan' AND usage_date = ?
+                """,
+                (date.today().isoformat(),),
+            ).fetchone()
+        return int(row["request_count"]) if row else 0
+    except Exception:  # noqa: BLE001 - health UI should remain available.
+        return 0
+
+
 def parse_360_environmental_results(page: str) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     for block in re.findall(r'<li class="[^"]*\bres-list\b[^"]*"[^>]*>(.*?)</li>', page, re.S | re.I):
@@ -4418,9 +4957,54 @@ def parse_360_environmental_results(page: str) -> list[dict[str, str]]:
                 "title": html_text(title_match.group(1)),
                 "url": html.unescape(url_match.group(1)),
                 "description": html_text(description_match.group(1)) if description_match else "",
+                "date": "",
+                "website": "",
+                "provider": "360公开网页索引",
             }
         )
     return results
+
+
+def search_public_web(
+    query: str,
+    top_k: int = 12,
+) -> tuple[list[dict[str, str]], str]:
+    """Search through Qianfan first, with the public index parser as fallback."""
+    normalized_query = truncate_baidu_search_query(query)
+    if not normalized_query:
+        return [], ""
+    manual_url = "https://www.baidu.com/s?" + urlencode({"wd": normalized_query})
+    api_key = baidu_search_api_key()
+    qianfan_error: Exception | None = None
+    if api_key:
+        cache_key = web_search_cache_key(normalized_query, top_k)
+        cached = cached_web_search(cache_key)
+        if cached is not None:
+            if cached:
+                return cached, manual_url
+        else:
+            try:
+                reserve_qianfan_search_request()
+                results = qianfan_web_search(api_key, normalized_query, top_k)
+                store_web_search_cache(cache_key, normalized_query, results)
+                if results:
+                    return results, manual_url
+            except Exception as exc:  # noqa: BLE001 - retain public fallback.
+                qianfan_error = exc
+                print(f"WARNING: {exc}; falling back to public index.", flush=True)
+
+    fallback_url = "https://www.so.com/s?" + urlencode({"q": normalized_query})
+    try:
+        return (
+            parse_360_environmental_results(fetch_html(fallback_url, timeout=20)),
+            fallback_url,
+        )
+    except Exception as fallback_error:
+        if qianfan_error:
+            raise RuntimeError(
+                f"{qianfan_error}；公开索引回退失败：{fallback_error}"
+            ) from fallback_error
+        raise
 
 
 def extract_competitor_company(value: str) -> str:
@@ -4518,8 +5102,8 @@ def collect_competitor_intelligence(
             "厂家 供应商 应用 客户 案例",
         ]
         query = " ".join(part for part in query_parts if part)
-        query_url = "https://www.so.com/s?" + urlencode({"q": query})
-        return job, parse_360_environmental_results(fetch_html(query_url, timeout=20)), query_url
+        results, query_url = search_public_web(query, top_k=16)
+        return job, results, query_url
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -4809,8 +5393,8 @@ def collect_environmental_documents(
     def fetch_job(job: tuple[str, str, str, str]) -> tuple[tuple[str, str, str, str], list[dict[str, str]]]:
         source_id, source_term, region, keyword = job
         query = f"{region} {keyword} 氟化物 含氟废水 {source_term} 企业"
-        url = "https://www.so.com/s?" + urlencode({"q": query})
-        return job, parse_360_environmental_results(fetch_html(url, timeout=20))
+        results, _ = search_public_web(query, top_k=20)
+        return job, results
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -4883,9 +5467,30 @@ def environmental_evidence_excerpt(text: str, signals: list[str], limit: int = 2
 
 
 def discover_company_website(company: str) -> str:
-    query_url = "https://www.so.com/s?" + urlencode({"q": f'"{company}" 官网'})
-    results = parse_360_environmental_results(fetch_html(query_url, timeout=18))
-    company_key = re.sub(r"(股份有限公司|有限责任公司|集团有限公司|有限公司)$", "", company)
+    results, _ = search_public_web(f'"{company}" 官网 联系方式', top_k=12)
+    company_key = re.sub(
+        r"(股份有限公司|有限责任公司|集团有限公司|有限公司)$",
+        "",
+        company,
+    )
+    company_without_region = re.sub(
+        r"^(?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|"
+        r"安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|"
+        r"陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆)(?:省|市|区)?",
+        "",
+        company_key,
+    )
+    company_signals = [
+        signal
+        for signal in {
+            company_key[:4],
+            company_without_region[:4],
+            company_without_region[:2]
+            if len(company_without_region) >= 4
+            else "",
+        }
+        if len(signal) >= 2
+    ]
     excluded_hosts = [
         "qcc.com",
         "tianyancha.com",
@@ -4896,14 +5501,30 @@ def discover_company_website(company: str) -> str:
         "sohu.com",
         "sina.com",
         "b2b",
+        "1688.com",
+        "huangye88.com",
+        "11467.com",
+        "cbi360.net",
+        "chemnet.com",
         "made-in-china.com",
+        "zhipin.com",
+        "liepin.com",
+        "51job.com",
+        "jobui.com",
+        "kanzhun.com",
+        "shuididp.cn",
     ]
     for result in results:
         parsed = urlparse(result["url"])
         host = (parsed.hostname or "").lower()
-        if not host or any(excluded in host for excluded in excluded_hosts):
+        if (
+            not host
+            or host.endswith(".gov.cn")
+            or any(excluded in host for excluded in excluded_hosts)
+        ):
             continue
-        if company_key[:4] not in f"{result['title']} {result['description']}":
+        evidence_text = f"{result['title']} {result['description']}"
+        if not any(signal in evidence_text for signal in company_signals):
             continue
         return f"{parsed.scheme or 'https'}://{parsed.netloc}/"
     return ""
@@ -4912,6 +5533,7 @@ def discover_company_website(company: str) -> str:
 def collect_environmental_company_websites(
     amap_key: str,
     baidu_map_ak: str,
+    tianditu_tk: str,
     regions: list[str],
     sectors: dict[str, dict[str, Any]],
     custom_keywords: list[str],
@@ -4940,7 +5562,7 @@ def collect_environmental_company_websites(
     region_terms = [region for region in regions if permit_region_code(region)][:4]
     amap_jobs: list[tuple[str, dict[str, Any], str]] = []
     map_jobs: list[tuple[str, dict[str, Any], str]] = []
-    if amap_key or baidu_map_ak:
+    if amap_key or baidu_map_ak or tianditu_tk:
         for region in region_terms:
             for sector_id, sector in sectors.items():
                 keyword = (
@@ -5043,6 +5665,50 @@ def collect_environmental_company_websites(
                         )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"百度官网候选/{region}/{keyword}：{exc}")
+
+    tianditu_jobs = list(map_jobs) if tianditu_tk else []
+    if tianditu_jobs:
+        with ThreadPoolExecutor(max_workers=min(TIANDITU_WORKERS, 4)) as executor:
+            futures = {
+                executor.submit(tianditu_search, tianditu_tk, region, keyword, 1): job
+                for job in tianditu_jobs
+                for region, _, keyword in [job]
+            }
+            for future in as_completed(futures):
+                region, sector, keyword = futures[future]
+                try:
+                    data = future.result()
+                    for poi in tianditu_pois(data):
+                        company = str(poi.get("name") or "").strip()
+                        if not company or not any(
+                            suffix in company for suffix in ["有限公司", "股份公司", "集团"]
+                        ):
+                            continue
+                        candidates.setdefault(
+                            company,
+                            {
+                                "company": company,
+                                "region": " ".join(
+                                    part
+                                    for part in [
+                                        as_text(poi.get("province")),
+                                        as_text(poi.get("city")),
+                                        as_text(poi.get("county")),
+                                    ]
+                                    if part
+                                ),
+                                "address": as_text(poi.get("address")),
+                                "phone": as_text(poi.get("phone")).replace(";", " / "),
+                                "website": "",
+                                "raw_type": as_text(
+                                    poi.get("typeName") or poi.get("typeCode")
+                                ),
+                                "sector": sector,
+                                "company_keyword": keyword,
+                            },
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"天地图官网候选/{region}/{keyword}：{exc}")
 
     discovery_candidates = [
         candidate for candidate in candidates.values() if not candidate["website"]
@@ -5244,6 +5910,7 @@ def collect_environmental_company_websites(
         errors,
         len(amap_jobs)
         + len(baidu_jobs)
+        + len(tianditu_jobs)
         + len(discovery_candidates)
         + len(selected_candidates),
     )
@@ -5461,6 +6128,7 @@ def website_notice_kind_from_title(value: str) -> str:
 def collect_company_website_notices(
     amap_key: str,
     baidu_map_ak: str,
+    tianditu_tk: str,
     regions: list[str],
     sectors: dict[str, dict[str, Any]],
     custom_keywords: list[str],
@@ -5468,8 +6136,11 @@ def collect_company_website_notices(
     date_window_id: str,
     progress_callback: Any = None,
 ) -> tuple[list[Lead], list[str], int]:
-    if not amap_key and not baidu_map_ak:
-        return [], ["企业官网采集需要配置高德 AMAP_KEY 或百度 BAIDU_MAP_AK。"], 0
+    if not amap_key and not baidu_map_ak and not tianditu_tk:
+        return [], [
+            "企业官网采集需要配置高德 AMAP_KEY、百度 BAIDU_MAP_AK "
+            "或天地图 TIANDITU_TK。"
+        ], 0
 
     company_jobs: list[tuple[str, dict[str, Any], str]] = []
     for region in regions:
@@ -5480,7 +6151,9 @@ def collect_company_website_notices(
     candidates: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     completed = 0
-    total = len(company_jobs) * int(bool(amap_key) + bool(baidu_map_ak))
+    total = len(company_jobs) * int(
+        bool(amap_key) + bool(baidu_map_ak) + bool(tianditu_tk)
+    )
     if progress_callback:
         progress_callback(0, total, 0, 0, "正在查找目标公司及官网")
 
@@ -5597,6 +6270,64 @@ def collect_company_website_notices(
                         len(candidates),
                         0,
                         f"百度地图正在查找公司：{keyword}",
+                    )
+
+    if tianditu_tk:
+        with ThreadPoolExecutor(max_workers=TIANDITU_WORKERS) as executor:
+            futures = {
+                executor.submit(tianditu_search, tianditu_tk, region, keyword, 1): (
+                    region,
+                    sector,
+                    keyword,
+                )
+                for region, sector, keyword in company_jobs
+            }
+            for future in as_completed(futures):
+                region, sector, keyword = futures[future]
+                try:
+                    data = future.result()
+                    for poi in tianditu_pois(data):
+                        name = str(poi.get("name") or "").strip()
+                        if not name:
+                            continue
+                        key = normalized_company_name(name)
+                        candidate = candidates.setdefault(
+                            key,
+                            {
+                                "company": name,
+                                "region": " ".join(
+                                    part
+                                    for part in [
+                                        as_text(poi.get("province")),
+                                        as_text(poi.get("city")),
+                                        as_text(poi.get("county")),
+                                    ]
+                                    if part
+                                ),
+                                "phone": "",
+                                "address": as_text(poi.get("address")),
+                                "website": "",
+                                "raw_type": as_text(
+                                    poi.get("typeName") or poi.get("typeCode")
+                                ),
+                                "sector": sector,
+                                "company_keyword": keyword,
+                            },
+                        )
+                        candidate["phone"] = merge_contact_values(
+                            candidate.get("phone"),
+                            as_text(poi.get("phone")).replace(";", " / "),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"天地图/{region}/{keyword}：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(candidates),
+                        0,
+                        f"天地图正在查找公司：{keyword}",
                     )
 
     discovery_candidates = [
@@ -6146,8 +6877,7 @@ def collect_social_leads(
     def fetch_job(job: tuple[str, dict[str, Any], str, str]) -> tuple[list[dict[str, str]], str]:
         _, platform, region, keyword = job
         query = f"site:{platform['search_domain']} {region} {keyword}"
-        query_url = "https://www.so.com/s?" + urlencode({"q": query})
-        return parse_360_environmental_results(fetch_html(query_url, timeout=20)), query_url
+        return search_public_web(query, top_k=12)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -6277,6 +7007,16 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             os.getenv("BAIDU_MAP_AK")
             or payload.get("baiduMapAk")
             or payload.get("baiduMapKey")
+            or ""
+        ).strip()
+    )
+    tianditu_tk = (
+        ""
+        if payload.get("disableTianditu")
+        else str(
+            os.getenv("TIANDITU_TK")
+            or payload.get("tiandituTk")
+            or payload.get("tiandituKey")
             or ""
         ).strip()
     )
@@ -6424,6 +7164,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 collect_environmental_company_websites(
                     amap_key,
                     baidu_map_ak,
+                    tianditu_tk,
                     regions,
                     sectors,
                     custom_keywords,
@@ -6564,6 +7305,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             website_leads, website_errors, website_requests = collect_company_website_notices(
                 amap_key,
                 baidu_map_ak,
+                tianditu_tk,
                 regions,
                 sectors,
                 custom_keywords,
@@ -6625,18 +7367,21 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         for source, configured in (
             ("高德", bool(amap_key)),
             ("百度地图", bool(baidu_map_ak)),
+            ("天地图", bool(tianditu_tk)),
         )
         if configured
     ]
     if require_map and not map_sources:
         leads = []
         errors.append(
-            "要显示具体公司和电话，必须配置高德 AMAP_KEY 或百度 BAIDU_MAP_AK；"
+            "要显示具体公司和电话，必须配置高德 AMAP_KEY、百度 BAIDU_MAP_AK "
+            "或天地图 TIANDITU_TK；"
             "否则只能生成开发任务清单。"
         )
     elif map_sources:
         amap_leads: list[Lead] = []
         baidu_leads: list[Lead] = []
+        tianditu_leads: list[Lead] = []
         errors = []
         provider_count = len(map_sources)
         provider_index = 0
@@ -6696,10 +7441,27 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 precision_mode=collection_strategy == "precision",
             )
             errors.extend(baidu_errors)
-        leads = merge_map_leads(amap_leads, baidu_leads)
+            provider_index += 1
+        if tianditu_tk:
+            tianditu_leads, tianditu_errors = collect_tianditu_leads(
+                tianditu_tk,
+                regions,
+                sectors,
+                custom_keywords,
+                pages,
+                keyword_limit,
+                direction,
+                exclude_suppliers,
+                strict_upstream,
+                provider_progress(provider_index, [*amap_leads, *baidu_leads]),
+                precision_mode=collection_strategy == "precision",
+            )
+            errors.extend(tianditu_errors)
+        leads = merge_map_leads(amap_leads, baidu_leads, tianditu_leads)
         if direction == "upstream" and not leads and strict_upstream:
             relaxed_amap: list[Lead] = []
             relaxed_baidu: list[Lead] = []
+            relaxed_tianditu: list[Lead] = []
             relaxed_errors: list[str] = []
             if amap_key:
                 relaxed_amap, source_errors = collect_amap_leads(
@@ -6731,7 +7493,26 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                     precision_mode=False,
                 )
                 relaxed_errors.extend(source_errors)
-            relaxed_leads = merge_map_leads(relaxed_amap, relaxed_baidu)
+            if tianditu_tk:
+                relaxed_tianditu, source_errors = collect_tianditu_leads(
+                    tianditu_tk,
+                    regions,
+                    sectors,
+                    custom_keywords,
+                    pages,
+                    max(keyword_limit, 4),
+                    direction,
+                    exclude_suppliers,
+                    False,
+                    progress_callback,
+                    precision_mode=False,
+                )
+                relaxed_errors.extend(source_errors)
+            relaxed_leads = merge_map_leads(
+                relaxed_amap,
+                relaxed_baidu,
+                relaxed_tianditu,
+            )
             if relaxed_leads:
                 leads = relaxed_leads
                 errors.extend(relaxed_errors)
@@ -6757,7 +7538,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 min(keyword_limit, len(item["keywords"]) + len(custom_keywords))
                 for item in sectors.values()
             ) * max(1, min(pages, 10)) * max(1, len(map_sources)),
-            "workers": max(AMAP_WORKERS, BAIDU_MAP_WORKERS),
+            "workers": max(AMAP_WORKERS, BAIDU_MAP_WORKERS, TIANDITU_WORKERS),
             "fastMode": fast_mode,
             "direction": direction,
             "mapSources": map_sources,
@@ -6771,7 +7552,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "task"
                 if used_fallback
                 else "maps"
-                if amap_key and baidu_map_ak
+                if len(map_sources) > 1
+                else "tianditu"
+                if tianditu_tk
                 else "baidu"
                 if baidu_map_ak
                 else "amap"
@@ -7423,6 +8206,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
                     "hasEnvBaiduMapAk": bool(os.getenv("BAIDU_MAP_AK")),
+                    "hasEnvTiandituTk": bool(os.getenv("TIANDITU_TK")),
+                    "hasEnvBaiduSearchApiKey": bool(baidu_search_api_key()),
                     "tursoConfigured": turso_active(),
                     "tursoEnvConfigured": turso_configured(),
                     "tursoError": TURSO_RUNTIME_ERROR,
@@ -7993,7 +8778,18 @@ def main() -> None:
         print("WARNING: AMAP_KEY is not set.")
     if not os.getenv("BAIDU_MAP_AK"):
         print("WARNING: BAIDU_MAP_AK is not set.")
-    if not os.getenv("AMAP_KEY") and not os.getenv("BAIDU_MAP_AK"):
+    if not os.getenv("TIANDITU_TK"):
+        print("WARNING: TIANDITU_TK is not set.")
+    if not baidu_search_api_key():
+        print(
+            "WARNING: BAIDU_SEARCH_API_KEY is not set. "
+            "Public web discovery will use the compatibility fallback."
+        )
+    if (
+        not os.getenv("AMAP_KEY")
+        and not os.getenv("BAIDU_MAP_AK")
+        and not os.getenv("TIANDITU_TK")
+    ):
         print("WARNING: No map API key is set. Company collection will remain disabled.")
     server = AppServer((args.host, args.port), AppHandler)
     print(f"Calcium chloride buyer finder running at http://{args.host}:{args.port}")
