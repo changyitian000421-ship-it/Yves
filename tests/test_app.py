@@ -213,6 +213,28 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(results[0]["provider"], "百度千帆网页搜索")
         self.assertEqual(results[0]["description"], "公司从事工业废水处理并公开联系电话。")
 
+    @patch("app.time.sleep")
+    @patch("app.urlopen")
+    def test_qianfan_web_search_retries_one_transient_timeout(
+        self,
+        urlopen,
+        _sleep,
+    ):
+        response = MagicMock()
+        response.read.return_value = b'{"request_id":"retry-1","references":[]}'
+        successful_open = MagicMock()
+        successful_open.__enter__.return_value = response
+        urlopen.side_effect = [TimeoutError("timed out"), successful_open]
+
+        results = app.qianfan_web_search(
+            "private-qianfan-key",
+            "山东 工业废水处理 企业 官网",
+            8,
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(urlopen.call_count, 2)
+
     @patch("app.urlopen")
     def test_qianfan_web_search_maps_site_operator_to_structured_filter(self, urlopen):
         response = MagicMock()
@@ -938,6 +960,59 @@ class LiquidCalciumAppTests(unittest.TestCase):
             connection.close()
         app.ensure_daily_backup()
         self.assertEqual(len(list(app.BACKUP_DIR.glob("*.db"))), 1)
+
+    def test_system_events_deduplicate_unresolved_identical_messages(self):
+        for _ in range(2):
+            app.log_system_event(
+                "warning",
+                "collection",
+                "同一数据源响应超时",
+                source="回归测试源",
+            )
+
+        with app.database_connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM system_events"
+            ).fetchone()[0]
+
+        self.assertEqual(count, 1)
+
+    def test_external_access_errors_are_compacted_and_classified_as_info(self):
+        errors = app.compact_external_access_errors(
+            [
+                "甲公司官网：<urlopen error timed out>",
+                "乙公司官网：HTTP Error 403: Forbidden",
+            ],
+            "企业官网",
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("2 个外部请求", errors[0])
+        self.assertIn("已自动跳过", errors[0])
+        self.assertEqual(app.collection_event_level(errors[0], True), "info")
+        self.assertEqual(
+            app.collection_event_level("采购平台已跳过本轮该来源", True),
+            "info",
+        )
+        self.assertEqual(app.collection_event_level(errors[0], False), "error")
+
+    @patch("app.time.sleep")
+    @patch("app.fetch_json", side_effect=TimeoutError("timed out"))
+    def test_procurement_probe_stops_timeout_storm(self, fetch_json, _sleep):
+        leads, errors, requests = app.collect_procurement_companies(
+            ["山东"],
+            {"water": app.PROCUREMENT_SECTOR_LIBRARY["water_treatment"]},
+            ["液体氯化钙"],
+            ["purchase"],
+            "10d",
+            keyword_limit=6,
+        )
+
+        self.assertEqual(leads, [])
+        self.assertEqual(requests, 1)
+        self.assertEqual(fetch_json.call_count, 2)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("已跳过本轮该来源", errors[0])
 
     def test_turso_connection_failure_falls_back_to_sqlite(self):
         original_disabled = app.TURSO_RUNTIME_DISABLED

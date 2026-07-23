@@ -119,7 +119,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v10.1-qianfan-verified"
+APP_VERSION = "liquid-calcium-ops-v10.2-timeout-hardened"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1259,21 +1259,50 @@ def log_system_event(
 ) -> None:
     try:
         with DATABASE_LOCK, database_connection() as connection:
-            connection.execute(
+            normalized_message = message[:2000]
+            existing = connection.execute(
                 """
-                INSERT INTO system_events (
-                    level, category, source, message, details, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                SELECT id
+                FROM system_events
+                WHERE resolved = 0
+                  AND level = ?
+                  AND category = ?
+                  AND source = ?
+                  AND message = ?
+                ORDER BY created_at DESC
+                LIMIT 1
                 """,
-                (
-                    level,
-                    category,
-                    source,
-                    message[:2000],
-                    json.dumps(details or {}, ensure_ascii=False),
-                    now_iso(),
-                ),
-            )
+                (level, category, source, normalized_message),
+            ).fetchone()
+            if existing:
+                connection.execute(
+                    """
+                    UPDATE system_events
+                    SET details = ?, created_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        json.dumps(details or {}, ensure_ascii=False),
+                        now_iso(),
+                        existing["id"],
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO system_events (
+                        level, category, source, message, details, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        level,
+                        category,
+                        source,
+                        normalized_message,
+                        json.dumps(details or {}, ensure_ascii=False),
+                        now_iso(),
+                    ),
+                )
     except Exception:
         pass
 
@@ -2900,7 +2929,131 @@ def notice_date_from_text(value: str) -> str:
     return f"{year}-{int(month):02d}-{int(day):02d}"
 
 
-def fetch_json(url: str, data: dict[str, str], timeout: int = 15) -> dict[str, Any]:
+def transient_network_error(error: BaseException) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code in {408, 425, 429, 500, 502, 503, 504}
+    if isinstance(error, (TimeoutError, URLError, ConnectionError)):
+        return True
+    text = str(error).lower()
+    return any(
+        signal in text
+        for signal in [
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "temporary failure",
+            "remote end closed",
+            "connection reset",
+            "connection aborted",
+            "unexpected eof",
+        ]
+    )
+
+
+def external_access_error_text(error: BaseException | str) -> str:
+    text = str(error)
+    lowered = text.lower()
+    if "403" in lowered or "forbidden" in lowered:
+        return "目标站点拒绝程序访问（403）"
+    if "redirect error" in lowered or "infinite loop" in lowered:
+        return "目标站点重定向异常"
+    if "certificate_verify_failed" in lowered or "hostname mismatch" in lowered:
+        return "目标站点证书域名不匹配"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "目标站点响应超时"
+    if "remote end closed" in lowered:
+        return "目标站点主动断开连接"
+    if "connection reset" in lowered or "connection aborted" in lowered:
+        return "目标站点连接中断"
+    return re.sub(r"\s+", " ", text).strip()[:240]
+
+
+def read_url_bytes(
+    request: Request,
+    timeout: int,
+    attempts: int = 1,
+) -> bytes:
+    attempt_limit = max(1, min(int(attempts), 3))
+    for attempt in range(attempt_limit):
+        try:
+            with urlopen(
+                request,
+                timeout=timeout,
+                context=DEFAULT_SSL_CONTEXT,
+            ) as response:
+                return response.read()
+        except Exception as exc:
+            if attempt + 1 >= attempt_limit or not transient_network_error(exc):
+                raise
+            time.sleep(0.35 * (attempt + 1) + random.uniform(0.05, 0.15))
+    return b""
+
+
+def compact_external_access_errors(
+    errors: list[str],
+    source_label: str,
+) -> list[str]:
+    access_errors = [
+        error
+        for error in errors
+        if any(
+            signal in error.lower()
+            for signal in [
+                "timed out",
+                "timeout",
+                "403",
+                "forbidden",
+                "redirect error",
+                "infinite loop",
+                "certificate_verify_failed",
+                "hostname mismatch",
+                "remote end closed",
+                "connection reset",
+                "连接中断",
+                "响应超时",
+                "拒绝程序访问",
+                "重定向异常",
+                "证书域名不匹配",
+            ]
+        )
+    ]
+    other_errors = [error for error in errors if error not in access_errors]
+    if not access_errors:
+        return errors
+    reasons = list(
+        dict.fromkeys(
+            external_access_error_text(error)
+            for error in access_errors
+        )
+    )
+    summary = (
+        f"{source_label}：{len(access_errors)} 个外部请求因"
+        f"{'、'.join(reasons[:3])}未完成，已自动跳过；其他来源继续运行。"
+    )
+    return [summary, *other_errors]
+
+
+def collection_event_level(message: str, has_leads: bool) -> str:
+    informational_signals = [
+        "已自动跳过",
+        "已跳过本轮",
+        "已切换",
+        "已返回",
+        "已生成",
+        "已快速切换",
+        "已核验官方许可索引",
+    ]
+    if has_leads and any(signal in message for signal in informational_signals):
+        return "info"
+    return "warning" if has_leads else "error"
+
+
+def fetch_json(
+    url: str,
+    data: dict[str, str],
+    timeout: int = 15,
+    attempts: int = 1,
+) -> dict[str, Any]:
     body = urlencode(data).encode("utf-8")
     req = Request(
         url,
@@ -2911,11 +3064,10 @@ def fetch_json(url: str, data: dict[str, str], timeout: int = 15) -> dict[str, A
             "Referer": "https://www.ggzy.gov.cn/deal/dealList.html",
         },
     )
-    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return json.loads(read_url_bytes(req, timeout, attempts).decode("utf-8"))
 
 
-def fetch_html(url: str, timeout: int = 15) -> str:
+def fetch_html(url: str, timeout: int = 15, attempts: int = 1) -> str:
     req = Request(
         url,
         headers={
@@ -2923,8 +3075,7 @@ def fetch_html(url: str, timeout: int = 15) -> str:
             "Referer": "https://www.ggzy.gov.cn/deal/dealList.html",
         },
     )
-    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    return read_url_bytes(req, timeout, attempts).decode("utf-8", errors="replace")
 
 
 def post_form_html(
@@ -2932,6 +3083,7 @@ def post_form_html(
     data: dict[str, str],
     timeout: int = 18,
     referer: str = "",
+    attempts: int = 1,
 ) -> str:
     req = Request(
         url,
@@ -2942,11 +3094,16 @@ def post_form_html(
             "Referer": referer or url,
         },
     )
-    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    return read_url_bytes(req, timeout, attempts).decode("utf-8", errors="replace")
 
 
-def post_json(url: str, data: dict[str, Any], timeout: int = 18, referer: str = "") -> dict[str, Any]:
+def post_json(
+    url: str,
+    data: dict[str, Any],
+    timeout: int = 18,
+    referer: str = "",
+    attempts: int = 1,
+) -> dict[str, Any]:
     req = Request(
         url,
         data=json.dumps(data, ensure_ascii=False).encode("utf-8"),
@@ -2957,8 +3114,9 @@ def post_json(url: str, data: dict[str, Any], timeout: int = 18, referer: str = 
             "Referer": referer or url,
         },
     )
-    with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    return json.loads(
+        read_url_bytes(req, timeout, attempts).decode("utf-8", errors="replace")
+    )
 
 
 def detail_value(page: str, code: str) -> str:
@@ -3735,12 +3893,12 @@ def collect_procurement_companies(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    keyword_limit: int = 10,
 ) -> tuple[list[Lead], list[str], int]:
     window_map = {"3d": "02", "10d": "03", "30d": "04", "90d": "05"}
-    keywords: list[tuple[str, dict[str, Any]]] = []
-    for sector in sectors.values():
-        sector_keywords = list(dict.fromkeys([*custom_keywords, *sector["keywords"]]))[:3]
-        keywords.extend((keyword, sector) for keyword in sector_keywords)
+    keywords = procurement_keyword_items(sectors, custom_keywords)[
+        : max(1, keyword_limit)
+    ]
 
     records_by_id: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
     errors: list[str] = []
@@ -3752,7 +3910,7 @@ def collect_procurement_companies(
     def search_keyword(item: tuple[str, dict[str, Any]]) -> tuple[str, dict[str, Any], dict[str, Any]]:
         keyword, sector = item
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 data = fetch_json(
                     "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList",
@@ -3762,7 +3920,7 @@ def collect_procurement_companies(
                         "FINDTXT": keyword,
                         "PAGENUMBER": "1",
                     },
-                    timeout=20,
+                    timeout=12,
                 )
                 return keyword, sector, data
             except Exception as exc:  # noqa: BLE001 - retry transient platform failures.
@@ -3770,26 +3928,67 @@ def collect_procurement_companies(
                 time.sleep(0.5 * (attempt + 1))
         raise last_error or RuntimeError("查询失败")
 
+    def consume_search_result(
+        keyword: str,
+        sector: dict[str, Any],
+        data: dict[str, Any],
+    ) -> None:
+        if data.get("code") != 200:
+            raise RuntimeError(
+                f"平台返回 {data.get('message') or data.get('code') or '查询失败'}"
+            )
+        for record in ((data.get("data") or {}).get("records") or []):
+            record_id = str(record.get("id") or "")
+            province = str(record.get("provinceText") or "")
+            if not record_id or not any(
+                region.replace("省", "") in province.replace("省", "")
+                for region in regions
+            ):
+                continue
+            if notice_type_ids and procurement_notice_kind(record) not in notice_type_ids:
+                continue
+            records_by_id.setdefault(record_id, (record, sector, keyword))
+
+    pending_keywords = list(keywords)
+    if pending_keywords:
+        first_item = pending_keywords.pop(0)
+        try:
+            keyword, sector, data = search_keyword(first_item)
+            consume_search_result(keyword, sector, data)
+        except Exception as exc:
+            error = external_access_error_text(exc)
+            return (
+                [],
+                [
+                    "全国公共资源交易平台暂时无法连接："
+                    f"{error}，已跳过本轮该来源；其他采购来源继续运行。"
+                ],
+                1,
+            )
+        completed = 1
+        if progress_callback:
+            progress_callback(
+                completed,
+                total_searches,
+                len(records_by_id),
+                0,
+                f"正在搜索：{keyword}",
+            )
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(search_keyword, item): item for item in keywords}
+        futures = {
+            executor.submit(search_keyword, item): item
+            for item in pending_keywords
+        }
         for future in as_completed(futures):
             keyword, sector = futures[future]
             try:
                 keyword, sector, data = future.result()
+                consume_search_result(keyword, sector, data)
             except Exception as exc:  # noqa: BLE001 - keep other keywords running.
-                errors.append(f"{keyword}：{exc}")
-                data = {}
-            if data.get("code") != 200:
-                if data:
-                    errors.append(f"{keyword}：平台返回 {data.get('message') or '查询失败'}")
-            for record in ((data.get("data") or {}).get("records") or []):
-                record_id = str(record.get("id") or "")
-                province = str(record.get("provinceText") or "")
-                if not record_id or not any(region.replace("省", "") in province.replace("省", "") for region in regions):
-                    continue
-                if notice_type_ids and procurement_notice_kind(record) not in notice_type_ids:
-                    continue
-                records_by_id.setdefault(record_id, (record, sector, keyword))
+                errors.append(
+                    f"{keyword}：{external_access_error_text(exc)}，已跳过"
+                )
             completed += 1
             if progress_callback:
                 progress_callback(
@@ -3866,7 +4065,11 @@ def collect_procurement_companies(
                     len([lead for lead in leads if lead.phone]),
                     "正在读取采购单位和联系方式",
                 )
-    return leads, errors, total_searches + detail_total
+    return (
+        leads,
+        compact_external_access_errors(errors, "全国公共资源交易平台"),
+        total_searches + detail_total,
+    )
 
 
 CCGP_NOTICE_CHANNELS: dict[str, list[tuple[str, str]]] = {
@@ -3919,6 +4122,7 @@ def collect_ccgp_notices(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    page_limit_cap: int = 2,
 ) -> tuple[list[Lead], list[str], int]:
     product_keywords = list(
         dict.fromkeys(
@@ -3938,7 +4142,10 @@ def collect_ccgp_notices(
         for channel, label in CCGP_NOTICE_CHANNELS.get(kind, [])
     ]
     page_limits = {"3d": 2, "10d": 4, "30d": 6, "90d": 8}
-    page_limit = page_limits.get(date_window_id, 4)
+    page_limit = min(
+        page_limits.get(date_window_id, 4),
+        max(1, page_limit_cap),
+    )
     list_jobs = [
         (kind, channel, label, page)
         for kind, channel, label in channels
@@ -3955,39 +4162,75 @@ def collect_ccgp_notices(
     def fetch_list(job: tuple[str, str, str, int]) -> tuple[tuple[str, str, str, int], str]:
         _, channel, _, page_number = job
         url = ccgp_list_url(channel, page_number)
-        return job, fetch_html(url, timeout=18)
+        return job, fetch_html(url, timeout=12, attempts=2)
+
+    def consume_list(
+        job: tuple[str, str, str, int],
+        page: str,
+    ) -> None:
+        kind, channel, label, page_number = job
+        base_url = ccgp_list_url(channel, page_number)
+        for record in parse_ccgp_list(page, base_url):
+            try:
+                notice_day = date.fromisoformat(record["date"][:10])
+            except ValueError:
+                notice_day = date.today()
+            if notice_day < cutoff or not region_selected(record["region"], regions):
+                continue
+            keyword = next(
+                (item for item in product_keywords if item and item in record["title"]),
+                "",
+            )
+            if not keyword:
+                continue
+            sector = next(
+                (
+                    item
+                    for item in sectors.values()
+                    if keyword in item.get("keywords", []) or keyword in custom_keywords
+                ),
+                next(iter(sectors.values())),
+            )
+            matches.setdefault(record["url"], (record, kind, sector, label))
+
+    pending_jobs = list(list_jobs)
+    if pending_jobs:
+        first_job = pending_jobs.pop(0)
+        try:
+            job, page = fetch_list(first_job)
+            consume_list(job, page)
+        except Exception as exc:
+            return (
+                [],
+                [
+                    "中国政府采购网暂时无法连接："
+                    f"{external_access_error_text(exc)}，已跳过本轮该来源；"
+                    "其他采购来源继续运行。"
+                ],
+                1,
+            )
+        completed = 1
+        if progress_callback:
+            progress_callback(
+                completed,
+                len(list_jobs),
+                len(matches),
+                0,
+                f"正在扫描中国政府采购网：{first_job[2]}",
+            )
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(fetch_list, job): job for job in list_jobs}
+        futures = {executor.submit(fetch_list, job): job for job in pending_jobs}
         for future in as_completed(futures):
             kind, channel, label, page_number = futures[future]
             try:
                 job, page = future.result()
-                base_url = ccgp_list_url(job[1], job[3])
-                for record in parse_ccgp_list(page, base_url):
-                    try:
-                        notice_day = date.fromisoformat(record["date"][:10])
-                    except ValueError:
-                        notice_day = date.today()
-                    if notice_day < cutoff or not region_selected(record["region"], regions):
-                        continue
-                    keyword = next(
-                        (item for item in product_keywords if item and item in record["title"]),
-                        "",
-                    )
-                    if not keyword:
-                        continue
-                    sector = next(
-                        (
-                            item
-                            for item in sectors.values()
-                            if keyword in item.get("keywords", []) or keyword in custom_keywords
-                        ),
-                        next(iter(sectors.values())),
-                    )
-                    matches.setdefault(record["url"], (record, kind, sector, label))
+                consume_list(job, page)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"中国政府采购网/{label}/第{page_number + 1}页：{exc}")
+                errors.append(
+                    f"中国政府采购网/{label}/第{page_number + 1}页："
+                    f"{external_access_error_text(exc)}，已跳过"
+                )
             completed += 1
             if progress_callback:
                 progress_callback(
@@ -4053,7 +4296,11 @@ def collect_ccgp_notices(
                     len([lead for lead in leads if lead.phone]),
                     "正在读取中国政府采购网公告详情",
                 )
-    return leads, errors, len(list_jobs) + len(selected)
+    return (
+        leads,
+        compact_external_access_errors(errors, "中国政府采购网"),
+        len(list_jobs) + len(selected),
+    )
 
 
 def fetch_zycg_records(page_number: int = 1) -> list[dict[str, Any]]:
@@ -4097,6 +4344,7 @@ def collect_zycg_notices(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    page_limit_cap: int = 8,
 ) -> tuple[list[Lead], list[str], int]:
     keyword_items: list[tuple[str, dict[str, Any]]] = [
         (keyword, sector)
@@ -4108,7 +4356,10 @@ def collect_zycg_notices(
     records: dict[str, tuple[dict[str, Any], str, dict[str, Any]]] = {}
     errors: list[str] = []
     page_limits = {"3d": 8, "10d": 14, "30d": 20, "90d": 24}
-    page_limit = page_limits.get(date_window_id, 14)
+    page_limit = min(
+        page_limits.get(date_window_id, 14),
+        max(1, page_limit_cap),
+    )
     if progress_callback:
         progress_callback(0, page_limit, 0, 0, "正在查询中央政府采购网")
 
@@ -4156,7 +4407,11 @@ def collect_zycg_notices(
             if stop_after_page or not page_records:
                 break
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"中央政府采购网/第{page_number}页：{exc}")
+            errors.append(
+                "中央政府采购网暂时无法连接："
+                f"{external_access_error_text(exc)}，已跳过本轮剩余页面；"
+                "其他采购来源继续运行。"
+            )
             break
 
     leads: list[Lead] = []
@@ -4207,7 +4462,11 @@ def collect_zycg_notices(
                 leads.append(future.result())
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"中央政府采购网公告解析失败：{exc}")
-    return leads, errors, pages_read + len(selected)
+    return (
+        leads,
+        compact_external_access_errors(errors, "中央政府采购网"),
+        pages_read + len(selected),
+    )
 
 
 def procurement_keyword_items(
@@ -4258,16 +4517,23 @@ def collect_shandong_notices(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    keyword_limit: int = 10,
 ) -> tuple[list[Lead], list[str], int]:
     if not region_selected("山东", regions):
         return [], [], 0
-    keyword_items = procurement_keyword_items(sectors, custom_keywords)
+    keyword_items = procurement_keyword_items(sectors, custom_keywords)[
+        : max(1, keyword_limit)
+    ]
     channels: list[tuple[str, str]] = []
     if any(kind in notice_type_ids for kind in ["purchase", "tender"]):
         channels.append(("queryContent-jyxxgg.jspx", "采购/资审公告"))
     if "award" in notice_type_ids:
         channels.append(("queryContent-jyxxgs.jspx", "交易结果公示"))
-    jobs = [(keyword, sector, channel, label) for keyword, sector in keyword_items for channel, label in channels]
+    jobs = [
+        (keyword, sector, channel, label)
+        for keyword, sector in keyword_items
+        for channel, label in channels
+    ]
     window_days = str(PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])[1])
     base_url = "https://ggzyjy.shandong.gov.cn/"
     records: dict[str, tuple[dict[str, str], str, dict[str, Any], str]] = {}
@@ -4288,23 +4554,60 @@ def collect_shandong_notices(
                 "channelId": "79",
                 "ext": "",
             },
+            timeout=12,
             referer=urljoin(base_url, channel),
+            attempts=2,
         )
         return job, page
 
+    def consume_page(
+        job: tuple[str, dict[str, Any], str, str],
+        page: str,
+    ) -> None:
+        keyword, sector, _, label = job
+        for record in parse_shandong_procurement_list(page, base_url):
+            kind = website_notice_kind_from_title(record["title"])
+            if kind not in notice_type_ids:
+                continue
+            records.setdefault(record["url"], (record, keyword, sector, label))
+
+    pending_jobs = list(jobs)
+    if pending_jobs:
+        first_job = pending_jobs.pop(0)
+        try:
+            job, page = fetch_job(first_job)
+            consume_page(job, page)
+        except Exception as exc:
+            return (
+                [],
+                [
+                    "山东省公共资源交易平台暂时无法连接："
+                    f"{external_access_error_text(exc)}，已跳过本轮该来源；"
+                    "其他采购来源继续运行。"
+                ],
+                1,
+            )
+        if progress_callback:
+            progress_callback(
+                1,
+                len(jobs),
+                len(records),
+                0,
+                f"正在查询山东省平台：{first_job[0]}",
+            )
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(fetch_job, job): job for job in jobs}
-        for completed, future in enumerate(as_completed(futures), start=1):
+        futures = {executor.submit(fetch_job, job): job for job in pending_jobs}
+        for completed, future in enumerate(as_completed(futures), start=2):
             keyword, sector, channel, label = futures[future]
             try:
-                _, page = future.result()
-                for record in parse_shandong_procurement_list(page, base_url):
-                    kind = website_notice_kind_from_title(record["title"])
-                    if kind not in notice_type_ids:
-                        continue
-                    records.setdefault(record["url"], (record, keyword, sector, label))
+                job, page = future.result()
+                consume_page(job, page)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"山东省公共资源交易平台/{keyword}：{exc}")
+                errors.append(
+                    f"山东省公共资源交易平台/{label}/{keyword}："
+                    f"{external_access_error_text(exc)}，已跳过"
+                )
             if progress_callback:
                 progress_callback(
                     completed,
@@ -4341,7 +4644,11 @@ def collect_shandong_notices(
                 notice_date=record["date"],
             )
         )
-    return leads, errors, len(jobs)
+    return (
+        leads,
+        compact_external_access_errors(errors, "山东省公共资源交易平台"),
+        len(jobs),
+    )
 
 
 def fetch_sichuan_procurement_records(
@@ -4405,7 +4712,9 @@ def fetch_sichuan_procurement_records(
     response = post_json(
         "https://ggzyjy.sc.gov.cn/inteligentsearch/rest/esinteligentsearch/getFullTextDataNew",
         payload,
+        timeout=12,
         referer="https://ggzyjy.sc.gov.cn/jyxx/transactionInfo.html",
+        attempts=2,
     )
     return ((response.get("result") or {}).get("records") or [])
 
@@ -4417,10 +4726,13 @@ def collect_sichuan_notices(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    keyword_limit: int = 10,
 ) -> tuple[list[Lead], list[str], int]:
     if not region_selected("四川", regions):
         return [], [], 0
-    keyword_items = procurement_keyword_items(sectors, custom_keywords)
+    keyword_items = procurement_keyword_items(sectors, custom_keywords)[
+        : max(1, keyword_limit)
+    ]
     categories: list[str] = []
     if any(kind in notice_type_ids for kind in ["purchase", "tender"]):
         categories.append("002002001")
@@ -4443,22 +4755,60 @@ def collect_sichuan_notices(
     ) -> tuple[tuple[str, dict[str, Any], str], list[dict[str, Any]]]:
         return item, fetch_sichuan_procurement_records(item[0], start_date, item[2])
 
+    def consume_records(
+        item: tuple[str, dict[str, Any], str],
+        page_records: list[dict[str, Any]],
+    ) -> None:
+        keyword, sector, _ = item
+        for record in page_records:
+            title = str(record.get("title") or record.get("titlenew") or "")
+            kind = website_notice_kind_from_title(title)
+            if kind not in notice_type_ids:
+                continue
+            url = urljoin(
+                "https://ggzyjy.sc.gov.cn",
+                str(record.get("linkurl") or ""),
+            )
+            if url:
+                records.setdefault(url, (record, keyword, sector))
+
+    pending_jobs = list(jobs)
+    if pending_jobs:
+        first_job = pending_jobs.pop(0)
+        try:
+            item, page_records = fetch_job(first_job)
+            consume_records(item, page_records)
+        except Exception as exc:
+            return (
+                [],
+                [
+                    "四川省公共资源交易信息网暂时无法连接："
+                    f"{external_access_error_text(exc)}，已跳过本轮该来源；"
+                    "其他采购来源继续运行。"
+                ],
+                1,
+            )
+        if progress_callback:
+            progress_callback(
+                1,
+                len(jobs),
+                len(records),
+                0,
+                f"正在查询四川省平台：{first_job[0]}",
+            )
+
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(fetch_job, item): item for item in jobs}
-        for completed, future in enumerate(as_completed(futures), start=1):
+        futures = {executor.submit(fetch_job, item): item for item in pending_jobs}
+        for completed, future in enumerate(as_completed(futures), start=2):
             keyword, sector, category = futures[future]
             try:
-                _, page_records = future.result()
-                for record in page_records:
-                    title = str(record.get("title") or record.get("titlenew") or "")
-                    kind = website_notice_kind_from_title(title)
-                    if kind not in notice_type_ids:
-                        continue
-                    url = urljoin("https://ggzyjy.sc.gov.cn", str(record.get("linkurl") or ""))
-                    if url:
-                        records.setdefault(url, (record, keyword, sector))
+                item, page_records = future.result()
+                consume_records(item, page_records)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"四川省公共资源交易信息网/{keyword}/{category}：{exc}")
+                errors.append(
+                    f"四川省公共资源交易信息网/{keyword}/{category}："
+                    f"{external_access_error_text(exc)}，已跳过"
+                )
             if progress_callback:
                 progress_callback(
                     completed,
@@ -4504,7 +4854,11 @@ def collect_sichuan_notices(
                 budget=detail.get("budget") or "",
             )
         )
-    return leads, errors, len(jobs)
+    return (
+        leads,
+        compact_external_access_errors(errors, "四川省公共资源交易信息网"),
+        len(jobs),
+    )
 
 
 PERMIT_LIST_URL = (
@@ -4766,16 +5120,17 @@ def qianfan_web_search(
         method="POST",
     )
     try:
-        with urlopen(
-            request,
-            timeout=20,
-            context=DEFAULT_SSL_CONTEXT,
-        ) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = json.loads(
+            read_url_bytes(request, timeout=20, attempts=2).decode("utf-8")
+        )
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
         raise RuntimeError(
             f"百度千帆搜索 HTTP {exc.code}：{detail or exc.reason}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"百度千帆搜索连接失败：{external_access_error_text(exc)}"
         ) from exc
 
     code = payload.get("code")
@@ -5312,8 +5667,10 @@ def collect_competitor_intelligence(
                 evidence_count=len(evidence),
             )
         )
-    return sorted(leads, key=lambda item: item.score, reverse=True), errors, len(jobs) + (
-        len(scan_records) if deep_scan else 0
+    return (
+        sorted(leads, key=lambda item: item.score, reverse=True),
+        compact_external_access_errors(errors, "竞品公开页面与企业官网"),
+        len(jobs) + (len(scan_records) if deep_scan else 0),
     )
 
 
@@ -5539,6 +5896,7 @@ def collect_environmental_company_websites(
     custom_keywords: list[str],
     seed_leads: list[Lead],
     progress_callback: Any = None,
+    candidate_limit: int = 16,
 ) -> tuple[list[Lead], list[str], int]:
     candidates: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
@@ -5712,7 +6070,7 @@ def collect_environmental_company_websites(
 
     discovery_candidates = [
         candidate for candidate in candidates.values() if not candidate["website"]
-    ][:12]
+    ][: min(12, max(1, candidate_limit))]
     if discovery_candidates:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -5728,7 +6086,7 @@ def collect_environmental_company_websites(
 
     selected_candidates = [
         candidate for candidate in candidates.values() if candidate["website"]
-    ][:30]
+    ][: max(1, candidate_limit)]
     if progress_callback:
         progress_callback(
             0,
@@ -5907,7 +6265,7 @@ def collect_environmental_company_websites(
                 )
     return (
         leads,
-        errors,
+        compact_external_access_errors(errors, "企业官网深度核验"),
         len(amap_jobs)
         + len(baidu_jobs)
         + len(tianditu_jobs)
@@ -6114,7 +6472,11 @@ def collect_environmental_permits(
                 index_warning,
                 *[error for error in errors if "官方平台当前限制程序直连" not in error],
             ]
-    return leads, errors, total_jobs + len(selected_records)
+    return (
+        leads,
+        compact_external_access_errors(errors, "全国排污许可证管理信息平台"),
+        total_jobs + len(selected_records),
+    )
 
 
 def website_notice_kind_from_title(value: str) -> str:
@@ -6135,6 +6497,7 @@ def collect_company_website_notices(
     notice_type_ids: list[str],
     date_window_id: str,
     progress_callback: Any = None,
+    candidate_limit: int = 16,
 ) -> tuple[list[Lead], list[str], int]:
     if not amap_key and not baidu_map_ak and not tianditu_tk:
         return [], [
@@ -6332,7 +6695,7 @@ def collect_company_website_notices(
 
     discovery_candidates = [
         candidate for candidate in candidates.values() if not candidate["website"]
-    ][:16]
+    ][: min(16, max(1, candidate_limit))]
     if discovery_candidates:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -6454,7 +6817,7 @@ def collect_company_website_notices(
     leads: list[Lead] = []
     selected_candidates = [
         candidate for candidate in candidates.values() if candidate["website"]
-    ][:30]
+    ][: max(1, candidate_limit)]
     website_total = len(selected_candidates)
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(inspect_candidate, item): item for item in selected_candidates}
@@ -6472,7 +6835,11 @@ def collect_company_website_notices(
                     len([lead for lead in leads if lead.phone]),
                     f"正在检查官网：{candidate['company']}",
                 )
-    return leads, errors, total + len(discovery_candidates) + website_total
+    return (
+        leads,
+        compact_external_access_errors(errors, "企业官网采购公告"),
+        total + len(discovery_candidates) + website_total,
+    )
 
 
 def identify_social_platform(url: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
@@ -7024,6 +7391,34 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     exclude_suppliers = bool(payload.get("excludeSuppliers", True))
     strict_upstream = bool(payload.get("strictUpstream", True))
     collection_strategy = str(payload.get("collectionStrategy") or "balanced")
+    strategy_limits = {
+        "precision": {
+            "keyword": 6,
+            "ccgp_pages": 1,
+            "zycg_pages": 4,
+            "website_candidates": 10,
+        },
+        "balanced": {
+            "keyword": 10,
+            "ccgp_pages": 2,
+            "zycg_pages": 8,
+            "website_candidates": 16,
+        },
+        "coverage": {
+            "keyword": 16,
+            "ccgp_pages": 4,
+            "zycg_pages": 14,
+            "website_candidates": 24,
+        },
+    }.get(
+        collection_strategy,
+        {
+            "keyword": 10,
+            "ccgp_pages": 2,
+            "zycg_pages": 8,
+            "website_candidates": 16,
+        },
+    )
     used_fallback = False
 
     errors: list[str] = []
@@ -7170,6 +7565,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                     custom_keywords,
                     leads,
                     progress_callback,
+                    strategy_limits["website_candidates"],
                 )
             )
             leads.extend(website_leads)
@@ -7250,6 +7646,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["keyword"],
             )
             leads.extend(platform_leads)
             errors.extend(platform_errors)
@@ -7262,6 +7659,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["ccgp_pages"],
             )
             leads.extend(ccgp_leads)
             errors.extend(ccgp_errors)
@@ -7273,6 +7671,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["zycg_pages"],
             )
             leads.extend(zycg_leads)
             errors.extend(zycg_errors)
@@ -7285,6 +7684,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["keyword"],
             )
             leads.extend(shandong_leads)
             errors.extend(shandong_errors)
@@ -7297,6 +7697,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["keyword"],
             )
             leads.extend(sichuan_leads)
             errors.extend(sichuan_errors)
@@ -7312,6 +7713,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 notice_type_ids,
                 date_window_id,
                 progress_callback,
+                strategy_limits["website_candidates"],
             )
             leads.extend(website_leads)
             errors.extend(website_errors)
@@ -7638,7 +8040,7 @@ def run_search_job(job_id: str, payload: dict[str, Any]) -> None:
         persistence = persist_search_result(result, job_id)
         result["persistence"] = persistence
         for error in result.get("errors") or []:
-            level = "warning" if result.get("leads") else "error"
+            level = collection_event_level(str(error), bool(result.get("leads")))
             log_system_event(
                 level,
                 "collection",
@@ -7803,7 +8205,7 @@ def _run_monitor(monitor_id: int) -> dict[str, Any]:
         )
         for error in result.get("errors") or []:
             log_system_event(
-                "warning",
+                collection_event_level(str(error), bool(result.get("leads"))),
                 "monitor",
                 str(error),
                 source=row["name"],
