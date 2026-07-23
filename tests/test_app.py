@@ -142,6 +142,20 @@ class LiquidCalciumAppTests(unittest.TestCase):
         )
         self.assertTrue(app.amap_region_matches("山东", "山东省", "济南市", "历下区"))
 
+    def test_health_status_reports_provider_presence_without_secret_values(self):
+        with patch.dict(
+            os.environ,
+            {"AMAP_KEY": "private-amap-key", "BAIDU_MAP_AK": "private-baidu-key"},
+            clear=False,
+        ):
+            status = app.health_status()
+
+        self.assertEqual(status["status"], "ok")
+        self.assertTrue(status["mapProviders"]["amap"])
+        self.assertTrue(status["mapProviders"]["baidu"])
+        self.assertNotIn("private-amap-key", str(status))
+        self.assertNotIn("private-baidu-key", str(status))
+
     @patch("app.urlopen")
     def test_baidu_map_search_uses_v3_region_and_zero_based_page(self, urlopen):
         response = MagicMock()

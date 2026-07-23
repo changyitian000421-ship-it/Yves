@@ -108,7 +108,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v8-baidu-map"
+APP_VERSION = "liquid-calcium-ops-v8.1-baidu-health"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -2214,6 +2214,18 @@ def system_overview() -> dict[str, Any]:
             }
             for row in source_rows
         ],
+    }
+
+
+def health_status() -> dict[str, Any]:
+    """Expose deployment capabilities without returning secret values."""
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "mapProviders": {
+            "amap": bool(os.getenv("AMAP_KEY")),
+            "baidu": bool(os.getenv("BAIDU_MAP_AK")),
+        },
     }
 
 
@@ -7375,7 +7387,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         path = urlparse(self.path).path
         if path == "/health":
-            json_response(self, {"status": "ok", "version": APP_VERSION})
+            json_response(self, health_status())
             return
         if path in {"/login", "/login.html"}:
             if self.authenticated():
