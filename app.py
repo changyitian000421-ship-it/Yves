@@ -92,6 +92,8 @@ ALIYUN_PNVS_SIGN_NAME = os.getenv("ALIYUN_PNVS_SIGN_NAME", "速通互联验证�
 ALIYUN_PNVS_TEMPLATE_CODE = os.getenv("ALIYUN_PNVS_TEMPLATE_CODE", "100001")
 AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
+BAIDU_MAP_WORKERS = max(1, min(int(os.getenv("BAIDU_MAP_WORKERS", "4")), 8))
+BAIDU_MAP_RETRY_CODES = {401}
 SEARCH_JOBS: dict[str, dict[str, Any]] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_TTL = 60 * 60
@@ -106,7 +108,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v3"
+APP_VERSION = "liquid-calcium-ops-v8-baidu-map"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -115,9 +117,124 @@ DIRECTION_LABELS = {
     "procurement": "招投标/采购",
     "environmental": "含氟废水企业",
     "competitor": "竞品/同行情报",
+    "social": "社媒线索雷达",
 }
-DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor"]
+DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor", "social"]
 DIRECTION_SET = set(DIRECTION_ORDER)
+
+SOCIAL_PLATFORM_LIBRARY: dict[str, dict[str, Any]] = {
+    "douyin": {
+        "name": "抖音",
+        "domains": ["douyin.com", "iesdouyin.com"],
+        "search_domain": "douyin.com",
+    },
+    "kuaishou": {
+        "name": "快手",
+        "domains": ["kuaishou.com", "gifshow.com"],
+        "search_domain": "kuaishou.com",
+    },
+    "xiaohongshu": {
+        "name": "小红书",
+        "domains": ["xiaohongshu.com", "xhslink.com"],
+        "search_domain": "xiaohongshu.com",
+    },
+    "bilibili": {
+        "name": "哔哩哔哩",
+        "domains": ["bilibili.com", "b23.tv"],
+        "search_domain": "bilibili.com",
+    },
+    "weibo": {
+        "name": "微博",
+        "domains": ["weibo.com", "weibo.cn"],
+        "search_domain": "weibo.com",
+    },
+    "wechat": {
+        "name": "微信公众号/视频号",
+        "domains": ["mp.weixin.qq.com", "channels.weixin.qq.com", "weixin.qq.com"],
+        "search_domain": "mp.weixin.qq.com",
+    },
+    "toutiao": {
+        "name": "今日头条",
+        "domains": ["toutiao.com"],
+        "search_domain": "toutiao.com",
+    },
+    "zhihu": {
+        "name": "知乎",
+        "domains": ["zhihu.com"],
+        "search_domain": "zhihu.com",
+    },
+}
+
+SOCIAL_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
+    "liquid_calcium": {
+        "name": "液体氯化钙供需",
+        "keywords": ["液体氯化钙", "液钙", "氯化钙溶液", "液钙采购"],
+        "score": 48,
+    },
+    "byproduct": {
+        "name": "副产液钙/处置",
+        "keywords": ["副产液体氯化钙", "副产液钙", "盐酸石灰中和", "液钙处置"],
+        "score": 50,
+    },
+    "fluoride": {
+        "name": "含氟废水/除氟",
+        "keywords": ["含氟废水", "废水除氟", "氟离子处理", "氟化物废水"],
+        "score": 46,
+    },
+    "downstream": {
+        "name": "下游应用/采购",
+        "keywords": ["融雪剂采购", "干燥剂厂家", "水处理药剂", "氯化钙采购"],
+        "score": 42,
+    },
+    "industry_process": {
+        "name": "重点行业工艺",
+        "keywords": ["稀土废水", "环氧氯丙烷副产", "飞灰水洗", "钨冶炼废水"],
+        "score": 44,
+    },
+    "competitor": {
+        "name": "同行供应商/客户案例",
+        "keywords": ["氯化钙厂家", "液钙供应商", "氯化钙客户案例", "液钙发货"],
+        "score": 38,
+    },
+}
+
+SOCIAL_DEFAULT_NEGATIVE_KEYWORDS = [
+    "实验教学",
+    "个人分享",
+    "招聘",
+    "零售小包装",
+    "家庭除湿",
+    "化学试剂",
+    "宠物用品",
+]
+
+SOCIAL_INTENT_LIBRARY: dict[str, dict[str, Any]] = {
+    "purchase": {
+        "name": "求购/采购",
+        "role": "buyer",
+        "keywords": ["求购", "采购", "急需", "寻源", "询价", "招募供应商", "长期需求", "需要液钙"],
+    },
+    "disposal": {
+        "name": "副产出售/处置",
+        "role": "supplier",
+        "keywords": ["副产", "处置", "外售", "处理液钙", "找接收", "综合利用", "长期供应副产"],
+    },
+    "fluoride_need": {
+        "name": "含氟废水处理需求",
+        "role": "prospect",
+        "keywords": ["含氟废水", "除氟改造", "氟化物超标", "废水治理", "除氟需求", "污水改造"],
+    },
+    "supplier": {
+        "name": "同行供应/销售",
+        "role": "supplier",
+        "keywords": ["厂家", "供应", "批发", "发货", "现货", "生产商", "库存充足", "槽车发货"],
+    },
+    "service": {
+        "name": "环保工程服务",
+        "role": "prospect",
+        "keywords": ["除氟设备", "环保工程", "技术服务", "解决方案", "工程案例", "污水处理设备"],
+    },
+}
 
 
 COMPETITOR_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
@@ -826,6 +943,23 @@ class Lead:
     competitor_regions: str = ""
     competitor_keywords: str = ""
     competitor_channels: str = ""
+    social_platform: str = ""
+    social_platform_id: str = ""
+    social_account: str = ""
+    social_account_url: str = ""
+    social_content_type: str = ""
+    social_matched_keywords: str = ""
+    social_engagement: str = ""
+    social_discovery_method: str = ""
+    social_intent: str = ""
+    social_intent_id: str = ""
+    social_intent_score: int = 0
+    social_intent_reasons: str = ""
+    social_positive_hits: str = ""
+    social_negative_hits: str = ""
+    social_entity_candidate: str = ""
+    social_entity_status: str = ""
+    opportunity_role: str = ""
     evidence_count: int = 0
     relevance_score: int = 0
     quality_grade: str = ""
@@ -1164,6 +1298,11 @@ def lead_dedupe_key(lead: dict[str, Any]) -> str:
     )
     if direction == "procurement" and project:
         raw = f"{direction}|{company}|{project}"
+    elif direction == "social":
+        platform = str(lead.get("social_platform_id") or lead.get("social_platform") or "")
+        account = normalized_company_name(lead.get("social_account") or lead.get("company"))
+        url_key = re.sub(r"[?#].*$", "", str(lead.get("search_url") or "").lower())
+        raw = f"{direction}|{platform}|{account or url_key}"
     else:
         raw = f"{direction}|{company}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1237,7 +1376,7 @@ def calculate_lead_score(lead: dict[str, Any]) -> tuple[int, dict[str, int]]:
     if evidence_date:
         age = max(0, (date.today() - evidence_date).days)
         freshness = 10 if age <= 7 else 7 if age <= 30 else 3 if age <= 90 else 0
-    elif lead.get("source") == "高德 POI":
+    elif "地图 POI" in str(lead.get("source") or ""):
         freshness = 4
 
     liquid_fit = 0
@@ -1305,7 +1444,7 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         len(company_key) >= 4
         and not any(
             word in company
-            for word in ("开发任务", "搜索任务", "检索入口", "待核验企业", "目标企业")
+            for word in ("开发任务", "搜索任务", "检索入口", "待核验企业", "目标企业", "待识别账号")
         )
     )
     official = any(
@@ -1321,21 +1460,31 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         "environmental": ("含氟废水", "废水氟化物", "氟离子", "氟化物（以f-计）", "明确确认"),
         "procurement": ("采购", "招标", "询价", "中标", "成交", "液体氯化钙", "氯化钙"),
         "competitor": ("液体氯化钙", "氯化钙溶液", "客户案例", "应用领域", "同行"),
+        "social": ("液体氯化钙", "液钙", "含氟废水", "氯化钙采购", "副产", "除氟"),
         "downstream": ("氯化钙", "融雪", "干燥剂", "钻井液", "水处理", "早强剂"),
     }
     explicit_match = any(
         word in evidence_text.lower() for word in direct_terms.get(direction, ())
     )
     relevance_score = int(lead.get("relevance_score") or lead.get("score") or 0)
+    feedback_status = str(lead.get("feedback_status") or "")
 
-    manually_confirmed = "手动新增" in source or "人工确认" in confidence
+    manually_confirmed = (
+        "手动新增" in source
+        or "人工确认" in confidence
+        or feedback_status == "valid"
+    )
 
-    if not concrete_company or source in {"搜索任务", "开发任务"}:
+    if feedback_status in {"irrelevant", "duplicate"}:
+        grade = "D"
+    elif not concrete_company or source in {"搜索任务", "开发任务"}:
         grade = "D"
     elif manually_confirmed:
         grade = "A"
     elif (official or website_evidence) and explicit_match and not inferred_only:
         grade = "A"
+    elif direction == "social" and explicit_match and has_evidence_link:
+        grade = "B"
     elif (official or website_evidence) or (has_phone and relevance_score >= 42):
         grade = "B"
     else:
@@ -1346,6 +1495,10 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         reasons.append("官方文件证据")
     if manually_confirmed:
         reasons.append("人工确认档案")
+    if feedback_status == "irrelevant":
+        reasons.append("人工标记无关")
+    elif feedback_status == "duplicate":
+        reasons.append("人工标记重复")
     if website_evidence:
         reasons.append("企业官网证据")
     if explicit_match:
@@ -1354,14 +1507,18 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         reasons.append("有公开电话")
     elif has_email:
         reasons.append("有公开邮箱")
-    if source == "高德 POI":
+    if "地图 POI" in source:
         reasons.append("地图登记企业")
+    if direction == "social" and has_evidence_link:
+        reasons.append("可打开公开社媒证据")
 
     issues: list[str] = []
     if not has_contact:
         issues.append("缺少直接联系方式")
-    if not (official or website_evidence or manually_confirmed):
+    if not (official or website_evidence or manually_confirmed) and direction != "social":
         issues.append("缺少官网或官方文件佐证")
+    if direction == "social":
+        issues.append("社媒账号不等同工商主体，联系前需核验企业名称")
     if not explicit_match:
         issues.append("仅为行业推断，需确认实际工艺或用途")
     elif inferred_only:
@@ -1369,10 +1526,14 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
     if not concrete_company:
         issues.append("不是可直接跟进的具体企业")
 
-    if grade == "A" and has_contact:
+    if feedback_status in {"irrelevant", "duplicate"}:
+        action = "已从优先线索中排除，后续相同公开内容将自动过滤"
+    elif grade == "A" and has_contact:
         action = "优先联系，核实用量/产量、指标、现有渠道和装卸条件"
     elif has_phone:
         action = "先电话确认实际用途或生产工艺，确认后再进入报价"
+    elif direction == "social" and has_evidence_link:
+        action = "打开原内容核验账号主体和近期供需信号，再补企业名称与联系方式"
     elif official or website_evidence:
         action = "打开证据原文补联系人，并核实公告或工艺是否仍有效"
     elif concrete_company:
@@ -1439,6 +1600,24 @@ def merged_lead_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> d
             merged[key] = value
     for key in ("phone", "email", "source"):
         merged[key] = merge_contact_values(existing.get(key), incoming.get(key))
+    merged["social_matched_keywords"] = merge_contact_values(
+        existing.get("social_matched_keywords"), incoming.get("social_matched_keywords"), 16
+    )
+    merged["evidence_count"] = max(
+        int(existing.get("evidence_count") or 0), int(incoming.get("evidence_count") or 0)
+    )
+    for key in (
+        "feedback_status",
+        "feedback_at",
+        "social_entity_confirmed_at",
+        "confirmed_company",
+    ):
+        if existing.get(key):
+            merged[key] = existing[key]
+    if existing.get("social_entity_status") == "已确认":
+        merged["social_entity_status"] = "已确认"
+        merged["social_entity_candidate"] = existing.get("social_entity_candidate", "")
+        merged["company"] = existing.get("confirmed_company") or existing.get("company")
     existing_relevance = int(existing.get("relevance_score") or 0)
     incoming_relevance = int(
         incoming.get("relevance_score") or incoming.get("score") or 0
@@ -1755,6 +1934,7 @@ def lead_row_payload(row: sqlite3.Row) -> dict[str, Any]:
             "commercial_value": row["commercial_value"],
         }
     )
+    enrich_social_payload(payload)
     if not payload.get("relevance_score"):
         payload["relevance_score"] = min(int(row["score"] or 0), 60)
     payload.update(lead_quality_profile(payload))
@@ -1805,6 +1985,115 @@ def get_saved_lead(lead_id: int) -> dict[str, Any] | None:
             (lead_id,),
         ).fetchone()
     return lead_row_payload(row) if row else None
+
+
+def attach_saved_lead_ids(leads: list[dict[str, Any]]) -> None:
+    if not leads:
+        return
+    keys = [lead_dedupe_key(lead) for lead in leads]
+    placeholders = ",".join("?" for _ in keys)
+    with DATABASE_LOCK, database_connection() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM leads WHERE dedupe_key IN ({placeholders})",
+            keys,
+        ).fetchall()
+    saved = {row["dedupe_key"]: lead_row_payload(row) for row in rows}
+    for lead, key in zip(leads, keys):
+        if key in saved:
+            lead.update(saved[key])
+
+
+def update_social_feedback(lead_id: int, status: str) -> dict[str, Any]:
+    labels = {"valid": "有效", "irrelevant": "无关", "duplicate": "重复"}
+    if status not in labels:
+        raise ValueError("反馈类型无效")
+    with DATABASE_LOCK, database_connection() as connection:
+        row = connection.execute(
+            "SELECT direction, payload FROM leads WHERE id = ?",
+            (lead_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("线索不存在")
+        if row["direction"] != "social":
+            raise ValueError("只有社媒线索可以使用此反馈")
+        payload = json.loads(row["payload"] or "{}")
+        enrich_social_payload(payload)
+        payload["feedback_status"] = status
+        payload["feedback_label"] = labels[status]
+        payload["feedback_at"] = now_iso()
+        payload.update(lead_quality_profile(payload))
+        score, score_details = calculate_lead_score(payload)
+        connection.execute(
+            """
+            UPDATE leads SET payload = ?, score = ?, score_details = ?,
+                is_new = 0, updated_at = ? WHERE id = ?
+            """,
+            (
+                json.dumps(payload, ensure_ascii=False),
+                score,
+                json.dumps(score_details, ensure_ascii=False),
+                now_iso(),
+                lead_id,
+            ),
+        )
+    log_activity(
+        "social_feedback",
+        "lead",
+        f"社媒线索反馈：{labels[status]}",
+        lead_id,
+        {"status": status},
+    )
+    return get_saved_lead(lead_id) or {}
+
+
+def confirm_social_entity(lead_id: int, company: str) -> dict[str, Any]:
+    company = re.sub(r"\s+", " ", company or "").strip()[:160]
+    if len(normalized_company_name(company)) < 4:
+        raise ValueError("请填写可核验的企业名称")
+    with DATABASE_LOCK, database_connection() as connection:
+        row = connection.execute(
+            "SELECT direction, payload FROM leads WHERE id = ?",
+            (lead_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("线索不存在")
+        if row["direction"] != "social":
+            raise ValueError("只有社媒线索可以确认主体")
+        payload = json.loads(row["payload"] or "{}")
+        payload.update(
+            {
+                "company": company,
+                "confirmed_company": company,
+                "social_entity_candidate": company,
+                "social_entity_status": "已确认",
+                "social_entity_confirmed_at": now_iso(),
+                "confidence": "人工确认社媒主体",
+                "qcc_url": build_search_links(company, "", "")["qcc"],
+            }
+        )
+        payload.update(lead_quality_profile(payload))
+        score, score_details = calculate_lead_score(payload)
+        connection.execute(
+            """
+            UPDATE leads SET company = ?, payload = ?, score = ?, score_details = ?,
+                is_new = 0, updated_at = ? WHERE id = ?
+            """,
+            (
+                company,
+                json.dumps(payload, ensure_ascii=False),
+                score,
+                json.dumps(score_details, ensure_ascii=False),
+                now_iso(),
+                lead_id,
+            ),
+        )
+    log_activity(
+        "confirm_entity",
+        "lead",
+        f"确认社媒企业主体：{company}",
+        lead_id,
+    )
+    return get_saved_lead(lead_id) or {}
 
 
 def dashboard_summary() -> dict[str, Any]:
@@ -1890,6 +2179,7 @@ def system_overview() -> dict[str, Any]:
         "tursoEnvConfigured": turso_configured(),
         "tursoError": TURSO_RUNTIME_ERROR,
         "amapConfigured": bool(os.getenv("AMAP_KEY")),
+        "baiduMapConfigured": bool(os.getenv("BAIDU_MAP_AK")),
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
         "events": [
             {
@@ -2104,6 +2394,8 @@ def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
 
 
 def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
+    if direction == "social":
+        return SOCIAL_SECTOR_LIBRARY
     if direction == "competitor":
         return COMPETITOR_SECTOR_LIBRARY
     if direction == "environmental":
@@ -2118,7 +2410,9 @@ def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
 def selected_sectors(ids: list[str] | None, direction: str) -> dict[str, dict[str, Any]]:
     library = get_sector_library(direction)
     if not ids:
-        if direction == "competitor":
+        if direction == "social":
+            ids = ["liquid_calcium", "byproduct", "fluoride", "downstream", "industry_process"]
+        elif direction == "competitor":
             ids = ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"]
         elif direction == "environmental":
             ids = ["fluorochemicals", "rare_earth", "phosphorus", "surface_treatment", "electronics"]
@@ -2301,11 +2595,67 @@ def amap_search(
     raise RuntimeError(f"高德 API 请求频率受限：{data.get('info') or '请稍后重试'}")
 
 
+def baidu_map_error_message(status: int, message: str) -> str:
+    messages = {
+        210: "百度地图 AK 的 IP 白名单校验失败",
+        240: "百度地图 AK 未开通地点检索服务",
+        302: "百度地图 API 今日调用额度已用完",
+        401: "百度地图 API 请求频率受限",
+    }
+    detail = messages.get(status, f"百度地图 API 返回错误 {status}")
+    return f"{detail}：{message}" if message else detail
+
+
+def baidu_map_search(
+    ak: str,
+    region: str,
+    keyword: str,
+    page: int,
+    page_size: int = 20,
+    timeout: int = 12,
+) -> dict[str, Any]:
+    query = urlencode(
+        {
+            "query": keyword,
+            "region": region,
+            "region_limit": "true",
+            "scope": "2",
+            "extensions_adcode": "true",
+            "page_size": str(max(1, min(page_size, 20))),
+            "page_num": str(max(0, page - 1)),
+            "output": "json",
+            "ret_coordtype": "gcj02ll",
+            "ak": ak,
+        }
+    )
+    url = f"https://api.map.baidu.com/place/v3/region?{query}"
+    req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
+    data: dict[str, Any] = {}
+    for attempt in range(5):
+        with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        status = int(data.get("status") or 0)
+        if status not in BAIDU_MAP_RETRY_CODES:
+            if status != 0:
+                raise RuntimeError(
+                    baidu_map_error_message(status, str(data.get("message") or ""))
+                )
+            return data
+        time.sleep((0.65 * (2**attempt)) + random.uniform(0.1, 0.55))
+    raise RuntimeError(
+        baidu_map_error_message(
+            int(data.get("status") or 401),
+            str(data.get("message") or "请稍后重试"),
+        )
+    )
+
+
 def build_search_links(company_type: str, region: str, keyword: str) -> dict[str, str]:
     query = quote(f"{region} {keyword} {company_type}")
     company_query = quote(company_type)
     return {
         "baidu": f"https://www.baidu.com/s?wd={query}",
+        "baidu_map": f"https://map.baidu.com/search/{quote(company_type)}",
         "amap": f"https://www.amap.com/search?query={query}",
         "ccgp": f"https://search.ccgp.gov.cn/bxsearch?searchtype=1&kw={quote(keyword)}",
         "qcc": f"https://www.qcc.com/web/search?key={company_query}",
@@ -2784,6 +3134,208 @@ def collect_amap_leads(
                     f"{region} · {keyword} · 第{page}页",
                 )
     return leads, errors
+
+
+def collect_baidu_map_leads(
+    baidu_map_ak: str,
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    pages: int,
+    keyword_limit: int,
+    direction: str,
+    exclude_suppliers: bool,
+    strict_upstream: bool,
+    progress_callback: Any = None,
+    precision_mode: bool = False,
+) -> tuple[list[Lead], list[str]]:
+    leads: list[Lead] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    pages = max(1, min(pages, 10))
+    jobs: list[tuple[str, dict[str, Any], str, int]] = []
+    for region in regions:
+        for sector in sectors.values():
+            keywords = list(sector["keywords"])
+            for custom in custom_keywords:
+                custom = custom.strip()
+                if custom and custom not in keywords:
+                    keywords.insert(0, custom)
+            keywords = list(dict.fromkeys(keywords))[:keyword_limit]
+            for keyword in keywords:
+                for page in range(1, pages + 1):
+                    jobs.append((region, sector, keyword, page))
+
+    with ThreadPoolExecutor(max_workers=BAIDU_MAP_WORKERS) as executor:
+        future_jobs = {
+            executor.submit(baidu_map_search, baidu_map_ak, region, keyword, page): (
+                region,
+                sector,
+                keyword,
+                page,
+            )
+            for region, sector, keyword, page in jobs
+        }
+        completed = 0
+        total = len(jobs)
+        if progress_callback:
+            progress_callback(completed, total, 0, 0, "正在连接百度地图数据服务")
+        for future in as_completed(future_jobs):
+            region, sector, keyword, page = future_jobs[future]
+            try:
+                data = future.result()
+            except Exception as exc:  # noqa: BLE001 - return source errors with other map results.
+                errors.append(f"百度地图 {region}/{keyword}/第{page}页：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(leads),
+                        len([lead for lead in leads if lead.phone]),
+                        f"百度地图 · {region} · {keyword} · 第{page}页",
+                    )
+                continue
+
+            for poi in data.get("results") or []:
+                name = str(poi.get("name") or "").strip()
+                if not name:
+                    continue
+                province = as_text(poi.get("province"))
+                city_name = as_text(poi.get("city"))
+                district = as_text(poi.get("area") or poi.get("district"))
+                if not amap_region_matches(region, province, city_name, district):
+                    continue
+                region_label = (
+                    " ".join(part for part in [province, city_name, district] if part)
+                    or region
+                )
+                address = as_text(poi.get("address"))
+                phone = as_text(poi.get("telephone")).replace(";", " / ")
+                detail_info = poi.get("detail_info") or {}
+                if not isinstance(detail_info, dict):
+                    detail_info = {}
+                raw_type = as_text(
+                    detail_info.get("classified_poi_tag")
+                    or detail_info.get("tag")
+                    or detail_info.get("type")
+                )
+                if direction == "downstream" and precision_mode and not likely_downstream_company(
+                    name, raw_type
+                ):
+                    continue
+                if direction == "upstream":
+                    upstream_text = f"{name} {raw_type}"
+                    if exclude_suppliers and any(
+                        word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS
+                    ):
+                        continue
+                    if not likely_upstream_company(name, raw_type):
+                        continue
+                    allowed, strong_match = upstream_match_quality(name, raw_type, sector)
+                    if not allowed or (strict_upstream and not strong_match):
+                        continue
+                poi_id = as_text(poi.get("uid"))
+                alias = as_text(detail_info.get("new_alias"))
+                location_value = poi.get("location") or {}
+                if isinstance(location_value, dict):
+                    lat = as_text(location_value.get("lat"))
+                    lng = as_text(location_value.get("lng"))
+                    location = ",".join(part for part in [lng, lat] if part)
+                else:
+                    location = as_text(location_value)
+                dedupe_key = f"{normalized_company_name(name)}|{address}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                if direction == "upstream":
+                    score, reason, confidence = upstream_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                else:
+                    score, reason = lead_score(
+                        name,
+                        raw_type,
+                        int(sector["score"]),
+                        bool(phone),
+                    )
+                    confidence = ""
+                links = build_search_links(name, region, keyword)
+                leads.append(
+                    Lead(
+                        company=name,
+                        region=region_label,
+                        sector=sector["name"],
+                        source="百度地图 POI",
+                        score=score,
+                        phone=phone,
+                        address=address,
+                        website=links["baidu"],
+                        use_case=sector.get("uses") or sector.get("process", ""),
+                        pitch=sector["pitch"],
+                        match_reason=(
+                            f"{keyword}；工艺线索：{reason}"
+                            if direction == "upstream"
+                            else f"{keyword}；{reason}"
+                        ),
+                        search_url=as_text(detail_info.get("detail_url"))
+                        or links["baidu_map"],
+                        raw_type=raw_type,
+                        qcc_url=links["qcc"],
+                        alias=alias,
+                        poi_id=poi_id,
+                        location=location,
+                        direction=direction,
+                        process_basis=sector.get("process", ""),
+                        confidence=confidence,
+                    )
+                )
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    total,
+                    len(leads),
+                    len([lead for lead in leads if lead.phone]),
+                    f"百度地图 · {region} · {keyword} · 第{page}页",
+                )
+    return leads, errors
+
+
+def merge_map_leads(*groups: list[Lead]) -> list[Lead]:
+    merged: dict[str, Lead] = {}
+    for lead in sorted(
+        (lead for group in groups for lead in group),
+        key=lambda item: (item.score, bool(item.phone), bool(item.address)),
+        reverse=True,
+    ):
+        key = normalized_company_name(lead.company) or f"{lead.company}|{lead.address}"
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = lead
+            continue
+        existing.source = merge_contact_values(existing.source, lead.source)
+        existing.phone = merge_contact_values(existing.phone, lead.phone)
+        existing.email = merge_contact_values(existing.email, lead.email)
+        existing.poi_id = merge_contact_values(existing.poi_id, lead.poi_id)
+        existing.evidence_count = max(2, existing.evidence_count + 1)
+        existing.score = min(100, max(existing.score, lead.score) + 4)
+        for field in (
+            "address",
+            "region",
+            "raw_type",
+            "company_website",
+            "location",
+            "updated_at",
+        ):
+            if not getattr(existing, field) and getattr(lead, field):
+                setattr(existing, field, getattr(lead, field))
+        if lead.match_reason and lead.match_reason not in existing.match_reason:
+            existing.match_reason = f"{existing.match_reason}；多源补充：{lead.match_reason}"
+    return sorted(merged.values(), key=lambda item: item.score, reverse=True)
 
 
 def procurement_monitor_entries(
@@ -4347,6 +4899,7 @@ def discover_company_website(company: str) -> str:
 
 def collect_environmental_company_websites(
     amap_key: str,
+    baidu_map_ak: str,
     regions: list[str],
     sectors: dict[str, dict[str, Any]],
     custom_keywords: list[str],
@@ -4374,15 +4927,18 @@ def collect_environmental_company_websites(
 
     region_terms = [region for region in regions if permit_region_code(region)][:4]
     amap_jobs: list[tuple[str, dict[str, Any], str]] = []
-    if amap_key:
+    map_jobs: list[tuple[str, dict[str, Any], str]] = []
+    if amap_key or baidu_map_ak:
         for region in region_terms:
             for sector_id, sector in sectors.items():
                 keyword = (
                     ENVIRONMENTAL_SEARCH_TERMS.get(sector_id, [])
                     or sector.get("keywords", [])
                 )[0]
-                amap_jobs.append((region, sector, keyword))
-        amap_jobs = amap_jobs[:12]
+                map_jobs.append((region, sector, keyword))
+        map_jobs = map_jobs[:12]
+    if amap_key:
+        amap_jobs = list(map_jobs)
 
     def fetch_amap_candidate(
         job: tuple[str, dict[str, Any], str],
@@ -4427,6 +4983,54 @@ def collect_environmental_company_websites(
                         )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"官网候选/{region}/{keyword}：{exc}")
+
+    baidu_jobs = list(map_jobs) if baidu_map_ak else []
+    if baidu_jobs:
+        with ThreadPoolExecutor(max_workers=min(BAIDU_MAP_WORKERS, 4)) as executor:
+            futures = {
+                executor.submit(baidu_map_search, baidu_map_ak, region, keyword, 1): job
+                for job in baidu_jobs
+                for region, _, keyword in [job]
+            }
+            for future in as_completed(futures):
+                region, sector, keyword = futures[future]
+                try:
+                    data = future.result()
+                    for poi in data.get("results") or []:
+                        company = str(poi.get("name") or "").strip()
+                        if not company or not any(
+                            suffix in company for suffix in ["有限公司", "股份公司", "集团"]
+                        ):
+                            continue
+                        detail_info = poi.get("detail_info") or {}
+                        if not isinstance(detail_info, dict):
+                            detail_info = {}
+                        candidates.setdefault(
+                            company,
+                            {
+                                "company": company,
+                                "region": " ".join(
+                                    part
+                                    for part in [
+                                        as_text(poi.get("province")),
+                                        as_text(poi.get("city")),
+                                        as_text(poi.get("area")),
+                                    ]
+                                    if part
+                                ),
+                                "address": as_text(poi.get("address")),
+                                "phone": as_text(poi.get("telephone")).replace(";", " / "),
+                                "website": "",
+                                "raw_type": as_text(
+                                    detail_info.get("classified_poi_tag")
+                                    or detail_info.get("type")
+                                ),
+                                "sector": sector,
+                                "company_keyword": keyword,
+                            },
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"百度官网候选/{region}/{keyword}：{exc}")
 
     discovery_candidates = [
         candidate for candidate in candidates.values() if not candidate["website"]
@@ -4623,7 +5227,14 @@ def collect_environmental_company_websites(
                     len(leads),
                     f"正在核验企业官网：{candidate['company']}",
                 )
-    return leads, errors, len(amap_jobs) + len(discovery_candidates) + len(selected_candidates)
+    return (
+        leads,
+        errors,
+        len(amap_jobs)
+        + len(baidu_jobs)
+        + len(discovery_candidates)
+        + len(selected_candidates),
+    )
 
 
 def collect_environmental_permits(
@@ -4837,6 +5448,7 @@ def website_notice_kind_from_title(value: str) -> str:
 
 def collect_company_website_notices(
     amap_key: str,
+    baidu_map_ak: str,
     regions: list[str],
     sectors: dict[str, dict[str, Any]],
     custom_keywords: list[str],
@@ -4844,8 +5456,8 @@ def collect_company_website_notices(
     date_window_id: str,
     progress_callback: Any = None,
 ) -> tuple[list[Lead], list[str], int]:
-    if not amap_key:
-        return [], ["企业官网采集需要配置高德 Web 服务 API Key。"], 0
+    if not amap_key and not baidu_map_ak:
+        return [], ["企业官网采集需要配置高德 AMAP_KEY 或百度 BAIDU_MAP_AK。"], 0
 
     company_jobs: list[tuple[str, dict[str, Any], str]] = []
     for region in regions:
@@ -4856,51 +5468,140 @@ def collect_company_website_notices(
     candidates: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     completed = 0
-    total = len(company_jobs)
+    total = len(company_jobs) * int(bool(amap_key) + bool(baidu_map_ak))
     if progress_callback:
         progress_callback(0, total, 0, 0, "正在查找目标公司及官网")
 
-    with ThreadPoolExecutor(max_workers=AMAP_WORKERS) as executor:
-        futures = {
-            executor.submit(amap_search, amap_key, region, keyword, 1): (region, sector, keyword)
-            for region, sector, keyword in company_jobs
-        }
-        for future in as_completed(futures):
-            region, sector, keyword = futures[future]
-            try:
-                data = future.result()
-                for poi in data.get("pois") or []:
-                    name = str(poi.get("name") or "").strip()
-                    website = normalize_website(first_text(poi.get("website")))
-                    if not name or not website:
-                        continue
-                    key = f"{name}|{website}"
-                    candidates.setdefault(
-                        key,
-                        {
-                            "company": name,
-                            "region": " ".join(
-                                part
-                                for part in [
-                                    as_text(poi.get("pname")),
-                                    as_text(poi.get("cityname")),
-                                    as_text(poi.get("adname")),
-                                ]
-                                if part
-                            ),
-                            "phone": as_text(poi.get("tel")).replace(";", " / "),
-                            "address": as_text(poi.get("address")),
-                            "website": website,
-                            "raw_type": as_text(poi.get("type")),
-                            "sector": sector,
-                            "company_keyword": keyword,
-                        },
+    if amap_key:
+        with ThreadPoolExecutor(max_workers=AMAP_WORKERS) as executor:
+            futures = {
+                executor.submit(amap_search, amap_key, region, keyword, 1): (
+                    region,
+                    sector,
+                    keyword,
+                )
+                for region, sector, keyword in company_jobs
+            }
+            for future in as_completed(futures):
+                region, sector, keyword = futures[future]
+                try:
+                    data = future.result()
+                    for poi in data.get("pois") or []:
+                        name = str(poi.get("name") or "").strip()
+                        website = normalize_website(first_text(poi.get("website")))
+                        if not name:
+                            continue
+                        key = normalized_company_name(name)
+                        candidates.setdefault(
+                            key,
+                            {
+                                "company": name,
+                                "region": " ".join(
+                                    part
+                                    for part in [
+                                        as_text(poi.get("pname")),
+                                        as_text(poi.get("cityname")),
+                                        as_text(poi.get("adname")),
+                                    ]
+                                    if part
+                                ),
+                                "phone": as_text(poi.get("tel")).replace(";", " / "),
+                                "address": as_text(poi.get("address")),
+                                "website": website,
+                                "raw_type": as_text(poi.get("type")),
+                                "sector": sector,
+                                "company_keyword": keyword,
+                            },
+                        )
+                except Exception as exc:  # noqa: BLE001 - keep other company searches running.
+                    errors.append(f"高德/{region}/{keyword}：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(candidates),
+                        0,
+                        f"高德正在查找公司：{keyword}",
                     )
-            except Exception as exc:  # noqa: BLE001 - keep other company searches running.
-                errors.append(f"{region}/{keyword}：{exc}")
-            completed += 1
-            if progress_callback:
-                progress_callback(completed, total, len(candidates), 0, f"正在查找公司：{keyword}")
+
+    if baidu_map_ak:
+        with ThreadPoolExecutor(max_workers=BAIDU_MAP_WORKERS) as executor:
+            futures = {
+                executor.submit(baidu_map_search, baidu_map_ak, region, keyword, 1): (
+                    region,
+                    sector,
+                    keyword,
+                )
+                for region, sector, keyword in company_jobs
+            }
+            for future in as_completed(futures):
+                region, sector, keyword = futures[future]
+                try:
+                    data = future.result()
+                    for poi in data.get("results") or []:
+                        name = str(poi.get("name") or "").strip()
+                        if not name:
+                            continue
+                        detail_info = poi.get("detail_info") or {}
+                        if not isinstance(detail_info, dict):
+                            detail_info = {}
+                        key = normalized_company_name(name)
+                        candidate = candidates.setdefault(
+                            key,
+                            {
+                                "company": name,
+                                "region": " ".join(
+                                    part
+                                    for part in [
+                                        as_text(poi.get("province")),
+                                        as_text(poi.get("city")),
+                                        as_text(poi.get("area")),
+                                    ]
+                                    if part
+                                ),
+                                "phone": "",
+                                "address": as_text(poi.get("address")),
+                                "website": "",
+                                "raw_type": as_text(
+                                    detail_info.get("classified_poi_tag")
+                                    or detail_info.get("type")
+                                ),
+                                "sector": sector,
+                                "company_keyword": keyword,
+                            },
+                        )
+                        candidate["phone"] = merge_contact_values(
+                            candidate.get("phone"),
+                            as_text(poi.get("telephone")).replace(";", " / "),
+                        )
+                except Exception as exc:  # noqa: BLE001 - keep other company searches running.
+                    errors.append(f"百度地图/{region}/{keyword}：{exc}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        len(candidates),
+                        0,
+                        f"百度地图正在查找公司：{keyword}",
+                    )
+
+    discovery_candidates = [
+        candidate for candidate in candidates.values() if not candidate["website"]
+    ][:16]
+    if discovery_candidates:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(discover_company_website, candidate["company"]): candidate
+                for candidate in discovery_candidates
+            }
+            for future in as_completed(futures):
+                candidate = futures[future]
+                try:
+                    candidate["website"] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{candidate['company']}官网定位：{exc}")
 
     announcement_words = ["招标", "采购", "询价", "竞价", "比选", "供应商", "征集", "谈判"]
     product_words = list(
@@ -5008,7 +5709,9 @@ def collect_company_website_notices(
         return found
 
     leads: list[Lead] = []
-    selected_candidates = list(candidates.values())[:30]
+    selected_candidates = [
+        candidate for candidate in candidates.values() if candidate["website"]
+    ][:30]
     website_total = len(selected_candidates)
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(inspect_candidate, item): item for item in selected_candidates}
@@ -5026,14 +5729,518 @@ def collect_company_website_notices(
                     len([lead for lead in leads if lead.phone]),
                     f"正在检查官网：{candidate['company']}",
                 )
-    return leads, errors, total + website_total
+    return leads, errors, total + len(discovery_candidates) + website_total
+
+
+def identify_social_platform(url: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    parsed = urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme not in {"http", "https"} or not host:
+        return None, None
+    for platform_id, platform in SOCIAL_PLATFORM_LIBRARY.items():
+        if any(host == domain or host.endswith(f".{domain}") for domain in platform["domains"]):
+            return platform_id, platform
+    return None, None
+
+
+class SocialMetadataParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.metadata: dict[str, str] = {}
+        self.in_title = False
+        self.title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {str(key).lower(): str(value or "") for key, value in attrs}
+        if tag.lower() == "title":
+            self.in_title = True
+        if tag.lower() != "meta":
+            return
+        key = (values.get("property") or values.get("name") or "").lower()
+        content = html.unescape(values.get("content") or "").strip()
+        if key and content and key not in self.metadata:
+            self.metadata[key] = content
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title_parts.append(data)
+
+
+def parse_social_metadata(page: str) -> dict[str, str]:
+    parser = SocialMetadataParser()
+    try:
+        parser.feed(page or "")
+    except Exception:  # noqa: BLE001 - partial metadata is still useful.
+        pass
+    title = (
+        parser.metadata.get("og:title")
+        or parser.metadata.get("twitter:title")
+        or " ".join(parser.title_parts)
+    )
+    description = (
+        parser.metadata.get("og:description")
+        or parser.metadata.get("description")
+        or parser.metadata.get("twitter:description")
+        or ""
+    )
+    author = parser.metadata.get("author") or parser.metadata.get("article:author") or ""
+    return {
+        "title": re.sub(r"\s+", " ", html.unescape(title)).strip()[:240],
+        "description": re.sub(r"\s+", " ", html.unescape(description)).strip()[:800],
+        "author": re.sub(r"\s+", " ", html.unescape(author)).strip()[:120],
+        "published": (
+            parser.metadata.get("article:published_time")
+            or parser.metadata.get("date")
+            or ""
+        )[:40],
+    }
+
+
+def social_account_from_text(value: str, platform_name: str) -> str:
+    text = re.sub(r"\s+", " ", html.unescape(value or "")).strip()
+    company = extract_competitor_company(text)
+    if company:
+        return company
+    brand_matches = re.findall(
+        r"[\u4e00-\u9fffA-Za-z0-9（）()·\-]{2,32}(?:化工|环保|材料|科技|实业|供应链|商贸|水处理)(?:有限公司)?",
+        text,
+    )
+    if brand_matches:
+        return re.sub(r"^(?:欢迎联系|联系|就找|找)", "", min(brand_matches, key=len))
+    publish_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9（）()·\-]{2,48})(?:于20\d{6}|发布在|发布于)",
+        text,
+    )
+    if publish_match:
+        candidate = publish_match.group(1)[-40:].strip()
+        if any(
+            signal in candidate
+            for signal in ("公司", "集团", "化工", "环保", "材料", "科技", "实业", "商贸", "工厂", "厂家")
+        ):
+            return candidate
+    phone_brand = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9（）()·\-]{2,36}(?:化工|环保|材料|科技|实业|供应链|商贸))(?=1[3-9]\d{9})",
+        text,
+    )
+    if phone_brand:
+        return phone_brand.group(1)
+    text = re.sub(
+        rf"\s*[-_｜|—·]\s*(?:{re.escape(platform_name)}|抖音|快手|小红书|哔哩哔哩|B站|微博|微信公众平台|今日头条|知乎).*$",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"^(?:视频|文章|笔记|动态)[：:]?", "", text).strip(" -_｜|—·：:")
+    if not text:
+        return ""
+    for separator in ("发布的", "的视频", "的主页", "：", ":", "｜", "|"):
+        if separator in text:
+            candidate = text.split(separator, 1)[0].strip()
+            if 2 <= len(candidate) <= 40 and any(
+                signal in candidate
+                for signal in ("公司", "集团", "化工", "环保", "材料", "科技", "实业", "商贸", "工厂", "厂家")
+            ):
+                return candidate
+    if 2 <= len(text) <= 24 and any(
+        signal in text
+        for signal in ("公司", "集团", "化工", "环保", "材料", "科技", "实业", "商贸", "工厂", "厂家")
+    ):
+        return text
+    return ""
+
+
+def social_public_phones(value: str) -> str:
+    mobile = re.findall(r"(?<!\d)(1[3-9]\d{9})(?!\d)", value or "")
+    landline = re.findall(r"(?<!\d)(0\d{2,3}[-\s]?\d{7,8})(?!\d)", value or "")
+    return "；".join(list(dict.fromkeys([*mobile, *landline]))[:4])
+
+
+def social_engagement_from_text(value: str) -> str:
+    signals = re.findall(
+        r"\d+(?:\.\d+)?(?:万|亿)?(?:次播放|次观看|个喜欢|次点赞|次收藏|次转发|阅读)",
+        value or "",
+    )
+    return "；".join(list(dict.fromkeys(signals))[:6])
+
+
+def split_social_rule_keywords(value: Any) -> list[str]:
+    if isinstance(value, list):
+        parts = value
+    else:
+        parts = re.split(r"[,，、;；\n]+", str(value or ""))
+    return list(dict.fromkeys(str(item).strip() for item in parts if str(item).strip()))
+
+
+def classify_social_intent(text: str, phone: str = "") -> dict[str, Any]:
+    compact = re.sub(r"\s+", " ", text or "")
+    ranked: list[tuple[int, str, dict[str, Any], list[str]]] = []
+    for intent_id, intent in SOCIAL_INTENT_LIBRARY.items():
+        hits = [keyword for keyword in intent["keywords"] if keyword in compact]
+        score = len(hits) * 18
+        if intent_id == "purchase" and any(word in compact for word in ("吨/月", "每月", "长期", "急需")):
+            score += 16
+        if intent_id == "disposal" and any(word in compact for word in ("副产液钙", "副产液体氯化钙", "找接收")):
+            score += 20
+        if intent_id == "fluoride_need" and any(word in compact for word in ("超标", "改造", "治理")):
+            score += 16
+        ranked.append((score, intent_id, intent, hits))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    best_score, intent_id, intent, hits = ranked[0]
+    commercial_hits = [
+        signal
+        for signal in ("长期", "急需", "吨/月", "槽车", "价格", "联系电话", "微信")
+        if signal in compact
+    ]
+    if phone:
+        commercial_hits.append("公开电话")
+        best_score += 12
+    best_score += min(18, len(commercial_hits) * 6)
+    if not hits:
+        return {
+            "id": "information",
+            "name": "行业内容/待判断",
+            "role": "prospect",
+            "score": min(45, best_score),
+            "reasons": "缺少明确求购、处置或工程需求动作词",
+        }
+    return {
+        "id": intent_id,
+        "name": intent["name"],
+        "role": intent["role"],
+        "score": min(100, 42 + best_score),
+        "reasons": "、".join(list(dict.fromkeys([*hits, *commercial_hits]))[:10]),
+    }
+
+
+def enrich_social_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Backfill intent and entity hints for social leads saved before v5."""
+    if payload.get("direction") != "social":
+        return payload
+    if not payload.get("social_intent_id"):
+        evidence_text = " ".join(
+            str(payload.get(field) or "")
+            for field in (
+                "company",
+                "project_title",
+                "use_case",
+                "process_basis",
+                "match_reason",
+                "social_matched_keywords",
+                "sector",
+            )
+        )
+        intent = classify_social_intent(evidence_text, str(payload.get("phone") or ""))
+        payload.update(
+            {
+                "social_intent": intent["name"],
+                "social_intent_id": intent["id"],
+                "social_intent_score": intent["score"],
+                "social_intent_reasons": intent["reasons"],
+            }
+        )
+        if not payload.get("opportunity_role") or payload.get("opportunity_role") == "prospect":
+            payload["opportunity_role"] = intent["role"]
+    account = str(payload.get("social_account") or payload.get("company") or "").strip()
+    if not payload.get("social_entity_candidate") and account and account != "待识别账号":
+        payload["social_entity_candidate"] = account
+    if not payload.get("social_entity_status"):
+        payload["social_entity_status"] = (
+            "待确认" if payload.get("social_entity_candidate") else "待识别"
+        )
+    return payload
+
+
+def social_feedback_rules() -> dict[str, set[str]]:
+    rules = {"excluded_urls": set(), "valid_accounts": set()}
+    try:
+        with DATABASE_LOCK, database_connection() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM leads WHERE direction = 'social'"
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"] or "{}")
+            feedback = str(payload.get("feedback_status") or "")
+            url = re.sub(r"[?#].*$", "", str(payload.get("search_url") or "").lower())
+            account = normalized_company_name(
+                payload.get("social_account") or payload.get("company")
+            )
+            if feedback in {"irrelevant", "duplicate"} and url:
+                rules["excluded_urls"].add(url)
+            elif feedback == "valid" and account:
+                rules["valid_accounts"].add(account)
+    except Exception:  # noqa: BLE001 - feedback learning must not block collection.
+        pass
+    return rules
+
+
+def apply_social_feedback_rules(
+    leads: list[Lead],
+    rules: dict[str, set[str]],
+) -> list[Lead]:
+    filtered: list[Lead] = []
+    for lead in leads:
+        url = re.sub(r"[?#].*$", "", str(lead.search_url or "").lower())
+        if url and url in rules["excluded_urls"]:
+            continue
+        account = normalized_company_name(lead.social_account or lead.company)
+        if account and account in rules["valid_accounts"]:
+            lead.score = min(60, lead.score + 6)
+            lead.confidence = f"{lead.confidence}；历史人工标记有效"
+        filtered.append(lead)
+    return filtered
+
+
+def social_keywords(sectors: dict[str, dict[str, Any]], custom_keywords: list[str]) -> list[str]:
+    values = [
+        keyword
+        for sector in sectors.values()
+        for keyword in sector.get("keywords", [])
+    ]
+    values.extend(custom_keywords)
+    return list(dict.fromkeys(item.strip() for item in values if item.strip()))
+
+
+def social_link_lead(
+    url: str,
+    sectors: dict[str, dict[str, Any]],
+    custom_keywords: list[str],
+    positive_keywords: list[str] | None = None,
+    negative_keywords: list[str] | None = None,
+) -> tuple[Lead | None, str]:
+    platform_id, platform = identify_social_platform(url)
+    if not platform_id or not platform:
+        return None, f"未识别或不支持的公开链接：{url[:160]}"
+    metadata = {"title": "", "description": "", "author": "", "published": ""}
+    fetch_error = ""
+    try:
+        metadata = parse_social_metadata(fetch_html(url, timeout=12))
+    except Exception as exc:  # noqa: BLE001 - retain the submitted link for manual verification.
+        fetch_error = str(exc)
+    text = f"{metadata['title']} {metadata['description']}"
+    keywords = list(
+        dict.fromkeys([*(positive_keywords or []), *social_keywords(sectors, custom_keywords)])
+    )
+    hits = [keyword for keyword in keywords if keyword.lower() in text.lower()]
+    negative_hits = [keyword for keyword in (negative_keywords or []) if keyword.lower() in text.lower()]
+    if negative_hits:
+        return None, f"{platform['name']}链接命中排除词：{'、'.join(negative_hits[:6])}"
+    author = metadata["author"] or social_account_from_text(metadata["title"], platform["name"])
+    account = author or "待识别账号"
+    title = metadata["title"] or f"{platform['name']}公开链接（待打开核验）"
+    score = min(60, 34 + min(18, len(hits) * 6) + (5 if author else 0))
+    phone = social_public_phones(text)
+    intent = classify_social_intent(text, phone)
+    score = min(60, score + (8 if intent["score"] >= 70 else 4 if intent["score"] >= 55 else 0))
+    entity_candidate = account if account != "待识别账号" else ""
+    reason = f"公开内容命中：{'、'.join(hits[:8])}" if hits else "用户导入的公开社媒链接，需打开核验业务相关性"
+    return (
+        Lead(
+            company=account,
+            region="待识别",
+            sector="社媒公开内容",
+            source=f"{platform['name']}公开链接",
+            score=score,
+            phone=phone,
+            website=url,
+            search_url=url,
+            use_case=metadata["description"][:260],
+            pitch="先核验账号对应企业、所在地区和近期供需信号，再补充工商主体与联系方式。",
+            match_reason=reason,
+            raw_type="用户导入链接",
+            direction="social",
+            process_basis=f"内容标题：{title}",
+            confidence="页面元数据" if metadata["title"] else "公开链接待核验",
+            project_title=title,
+            notice_date=notice_date_from_text(metadata["published"] or text),
+            social_platform=platform["name"],
+            social_platform_id=platform_id,
+            social_account=account,
+            social_account_url=url,
+            social_content_type="公开内容",
+            social_matched_keywords="；".join(hits[:12]),
+            social_engagement=social_engagement_from_text(text),
+            social_discovery_method="链接导入",
+            social_intent=intent["name"],
+            social_intent_id=intent["id"],
+            social_intent_score=intent["score"],
+            social_intent_reasons=intent["reasons"],
+            social_positive_hits="；".join(hits[:12]),
+            social_negative_hits="",
+            social_entity_candidate=entity_candidate,
+            social_entity_status="待确认" if entity_candidate else "待识别",
+            opportunity_role=intent["role"],
+            qcc_url=build_search_links(entity_candidate, "", "")["qcc"] if entity_candidate else "",
+            evidence_count=1,
+        ),
+        f"{platform['name']}页面暂时无法读取，已保留链接供人工核验：{fetch_error}" if fetch_error else "",
+    )
+
+
+def collect_social_leads(
+    regions: list[str],
+    sectors: dict[str, dict[str, Any]],
+    platform_ids: list[str],
+    links: list[str],
+    custom_keywords: list[str],
+    collection_strategy: str,
+    progress_callback: Any = None,
+    positive_keywords: list[str] | None = None,
+    negative_keywords: list[str] | None = None,
+) -> tuple[list[Lead], list[str], int]:
+    selected_platforms = {
+        platform_id: SOCIAL_PLATFORM_LIBRARY[platform_id]
+        for platform_id in platform_ids
+        if platform_id in SOCIAL_PLATFORM_LIBRARY
+    }
+    errors: list[str] = []
+    leads: list[Lead] = []
+    request_count = 0
+    positive_keywords = positive_keywords or []
+    negative_keywords = negative_keywords or SOCIAL_DEFAULT_NEGATIVE_KEYWORDS
+    for url in links[:50]:
+        lead, warning = social_link_lead(
+            url,
+            sectors,
+            custom_keywords,
+            positive_keywords,
+            negative_keywords,
+        )
+        if lead:
+            leads.append(lead)
+            request_count += 1
+        if warning:
+            errors.append(warning)
+
+    keywords = list(
+        dict.fromkeys([*positive_keywords, *social_keywords(sectors, custom_keywords)])
+    )
+    search_regions = regions[:6] or ["全国"]
+    jobs: list[tuple[str, dict[str, Any], str, str]] = []
+    for region_index, region in enumerate(search_regions):
+        for platform_index, (platform_id, platform) in enumerate(selected_platforms.items()):
+            if not keywords:
+                continue
+            keyword = keywords[(platform_index + region_index) % len(keywords)]
+            jobs.append((platform_id, platform, region, keyword))
+    job_limit = {"precision": 16, "balanced": 28, "coverage": 44}.get(collection_strategy, 28)
+    jobs = jobs[:job_limit]
+    if progress_callback:
+        progress_callback(0, len(jobs), len(leads), 0, "正在检索各平台公开索引")
+
+    def fetch_job(job: tuple[str, dict[str, Any], str, str]) -> tuple[list[dict[str, str]], str]:
+        _, platform, region, keyword = job
+        query = f"site:{platform['search_domain']} {region} {keyword}"
+        query_url = "https://www.so.com/s?" + urlencode({"q": query})
+        return parse_360_environmental_results(fetch_html(query_url, timeout=20)), query_url
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fetch_job, job): job for job in jobs}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            platform_id, platform, region, keyword = futures[future]
+            try:
+                results, query_url = future.result()
+                request_count += 1
+                for result in results[:10]:
+                    result_platform_id, _ = identify_social_platform(result["url"])
+                    if result_platform_id != platform_id:
+                        continue
+                    evidence_text = f"{result['title']} {result['description']}"
+                    negative_hits = [
+                        item for item in negative_keywords if item.lower() in evidence_text.lower()
+                    ]
+                    if negative_hits:
+                        continue
+                    matched = [item for item in keywords if item.lower() in evidence_text.lower()]
+                    if not matched:
+                        continue
+                    account = social_account_from_text(evidence_text, platform["name"]) or "待识别账号"
+                    phone = social_public_phones(evidence_text)
+                    intent = classify_social_intent(evidence_text, phone)
+                    entity_candidate = account if account != "待识别账号" else ""
+                    relevance = min(
+                        60,
+                        38
+                        + min(18, len(matched) * 6)
+                        + (8 if intent["score"] >= 70 else 4 if intent["score"] >= 55 else 0),
+                    )
+                    leads.append(
+                        Lead(
+                            company=account,
+                            region=region,
+                            sector=next(
+                                (sector["name"] for sector in sectors.values() if any(item in sector.get("keywords", []) for item in matched)),
+                                "社媒公开内容",
+                            ),
+                            source=f"{platform['name']}公开索引",
+                            score=relevance,
+                            phone=phone,
+                            website=result["url"],
+                            search_url=result["url"],
+                            use_case=result["description"][:260],
+                            pitch="打开原内容确认账号主体、业务场景、地区和发布时间，再补企业联系方式。",
+                            match_reason=f"公开索引命中：{'、'.join(matched[:8])}",
+                            raw_type="搜索引擎公开索引",
+                            direction="social",
+                            process_basis=f"内容标题：{result['title']}；检索词：{region} {keyword}",
+                            confidence="公开索引待核验",
+                            project_title=result["title"][:240],
+                            notice_date=notice_date_from_text(evidence_text),
+                            social_platform=platform["name"],
+                            social_platform_id=platform_id,
+                            social_account=account,
+                            social_account_url=result["url"],
+                            social_content_type="公开索引内容",
+                            social_matched_keywords="；".join(matched[:12]),
+                            social_engagement=social_engagement_from_text(evidence_text),
+                            social_discovery_method="公开索引监控",
+                            social_intent=intent["name"],
+                            social_intent_id=intent["id"],
+                            social_intent_score=intent["score"],
+                            social_intent_reasons=intent["reasons"],
+                            social_positive_hits="；".join(matched[:12]),
+                            social_negative_hits="",
+                            social_entity_candidate=entity_candidate,
+                            social_entity_status="待确认" if entity_candidate else "待识别",
+                            opportunity_role=intent["role"],
+                            qcc_url=build_search_links(entity_candidate, "", "")["qcc"] if entity_candidate else "",
+                            evidence_count=1,
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{platform['name']}/{region}/{keyword}：{exc}")
+            if progress_callback:
+                progress_callback(completed, len(jobs), len(leads), 0, f"正在检索{platform['name']}：{region} {keyword}")
+
+    learned_rules = social_feedback_rules()
+    deduped: dict[str, Lead] = {}
+    for lead in sorted(
+        apply_social_feedback_rules(leads, learned_rules),
+        key=lambda item: (item.social_intent_score, item.score),
+        reverse=True,
+    ):
+        key = lead_dedupe_key(asdict(lead))
+        existing = deduped.get(key)
+        if not existing:
+            deduped[key] = lead
+            continue
+        existing.evidence_count += 1
+        existing.social_matched_keywords = merge_contact_values(
+            existing.social_matched_keywords, lead.social_matched_keywords, 16
+        )
+        if lead.project_title and lead.project_title not in existing.process_basis:
+            existing.process_basis = f"{existing.process_basis}；补充内容：{lead.project_title[:120]}"
+    return sorted(deduped.values(), key=lambda item: item.score, reverse=True), errors, request_count
 
 
 def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
     requested_direction = str(payload.get("direction") or "")
     direction = (
         requested_direction
-        if requested_direction in {"upstream", "procurement", "environmental", "competitor"}
+        if requested_direction in {"upstream", "procurement", "environmental", "competitor", "social"}
         else "downstream"
     )
     regions = normalize_regions(payload.get("regions"))
@@ -5051,13 +6258,76 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         if payload.get("disableAmap")
         else str(os.getenv("AMAP_KEY") or payload.get("amapKey") or "").strip()
     )
-    require_amap = bool(payload.get("requireAmap"))
+    baidu_map_ak = (
+        ""
+        if payload.get("disableBaiduMap")
+        else str(
+            os.getenv("BAIDU_MAP_AK")
+            or payload.get("baiduMapAk")
+            or payload.get("baiduMapKey")
+            or ""
+        ).strip()
+    )
+    require_map = bool(payload.get("requireMap") or payload.get("requireAmap"))
     exclude_suppliers = bool(payload.get("excludeSuppliers", True))
     strict_upstream = bool(payload.get("strictUpstream", True))
     collection_strategy = str(payload.get("collectionStrategy") or "balanced")
     used_fallback = False
 
     errors: list[str] = []
+    if direction == "social":
+        requested_platforms = payload.get("socialPlatforms")
+        platform_ids = [
+            str(item)
+            for item in (
+                SOCIAL_PLATFORM_LIBRARY.keys()
+                if requested_platforms is None
+                else requested_platforms
+            )
+        ]
+        raw_links = payload.get("socialLinks") or []
+        if isinstance(raw_links, str):
+            raw_links = re.findall(r"https?://[^\s<>\"']+", raw_links)
+        links = list(dict.fromkeys(str(item).strip().rstrip("，,。.;；") for item in raw_links if str(item).strip()))
+        positive_keywords = split_social_rule_keywords(payload.get("socialPositiveKeywords"))
+        negative_keywords = split_social_rule_keywords(payload.get("socialNegativeKeywords"))
+        if not negative_keywords:
+            negative_keywords = SOCIAL_DEFAULT_NEGATIVE_KEYWORDS
+        leads, errors, request_count = collect_social_leads(
+            regions,
+            sectors,
+            platform_ids,
+            links,
+            custom_keywords,
+            collection_strategy,
+            progress_callback,
+            positive_keywords,
+            negative_keywords,
+        )
+        prepared_leads = prepare_lead_results(leads)
+        return {
+            "leads": prepared_leads,
+            "errors": errors[:40],
+            "meta": {
+                "count": len(leads),
+                "companyCount": len([lead for lead in leads if lead.social_account != "待识别账号"]),
+                "phoneCount": len([lead for lead in leads if lead.phone]),
+                "platformCount": len({lead.social_platform_id for lead in leads if lead.social_platform_id}),
+                "requestCount": request_count,
+                "workers": 4,
+                "fastMode": False,
+                "direction": direction,
+                "regions": regions,
+                "sectors": [item["name"] for item in sectors.values()],
+                "socialPlatforms": platform_ids,
+                "socialPositiveKeywords": positive_keywords,
+                "socialNegativeKeywords": negative_keywords,
+                "importedCount": len([lead for lead in leads if lead.social_discovery_method == "链接导入"]),
+                "indexCount": len([lead for lead in leads if lead.social_discovery_method == "公开索引监控"]),
+                "qualitySummary": lead_quality_summary(prepared_leads),
+                "mode": "social",
+            },
+        }
     if direction == "competitor":
         competitor_sources = [
             str(source)
@@ -5141,6 +6411,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             website_leads, website_errors, website_requests = (
                 collect_environmental_company_websites(
                     amap_key,
+                    baidu_map_ak,
                     regions,
                     sectors,
                     custom_keywords,
@@ -5280,6 +6551,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         if "company_website" in procurement_sources:
             website_leads, website_errors, website_requests = collect_company_website_notices(
                 amap_key,
+                baidu_map_ak,
                 regions,
                 sectors,
                 custom_keywords,
@@ -5336,37 +6608,118 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "mode": "procurement",
             },
         }
-    if require_amap and not amap_key:
-        leads = []
-        errors.append("要显示具体公司和电话，必须填写高德 Web 服务 API Key；否则只能生成开发任务清单。")
-    elif amap_key:
-        leads, errors = collect_amap_leads(
-            amap_key,
-            regions,
-            sectors,
-            custom_keywords,
-            pages,
-            keyword_limit,
-            direction,
-            exclude_suppliers,
-            strict_upstream,
-            progress_callback,
-            precision_mode=collection_strategy == "precision",
+    map_sources = [
+        source
+        for source, configured in (
+            ("高德", bool(amap_key)),
+            ("百度地图", bool(baidu_map_ak)),
         )
-        if direction == "upstream" and not leads and strict_upstream:
-            relaxed_leads, relaxed_errors = collect_amap_leads(
+        if configured
+    ]
+    if require_map and not map_sources:
+        leads = []
+        errors.append(
+            "要显示具体公司和电话，必须配置高德 AMAP_KEY 或百度 BAIDU_MAP_AK；"
+            "否则只能生成开发任务清单。"
+        )
+    elif map_sources:
+        amap_leads: list[Lead] = []
+        baidu_leads: list[Lead] = []
+        errors = []
+        provider_count = len(map_sources)
+        provider_index = 0
+
+        def provider_progress(
+            offset: int,
+            existing: list[Lead],
+        ) -> Any:
+            if not progress_callback:
+                return None
+
+            def callback(
+                completed: int,
+                total: int,
+                company_count: int,
+                phone_count: int,
+                current: str,
+            ) -> None:
+                progress_callback(
+                    (offset * total) + completed,
+                    total * provider_count,
+                    len(existing) + company_count,
+                    len([lead for lead in existing if lead.phone]) + phone_count,
+                    current,
+                )
+
+            return callback
+
+        if amap_key:
+            amap_leads, amap_errors = collect_amap_leads(
                 amap_key,
                 regions,
                 sectors,
                 custom_keywords,
                 pages,
-                max(keyword_limit, 4),
+                keyword_limit,
                 direction,
                 exclude_suppliers,
-                False,
-                progress_callback,
-                precision_mode=False,
+                strict_upstream,
+                provider_progress(provider_index, []),
+                precision_mode=collection_strategy == "precision",
             )
+            errors.extend(amap_errors)
+            provider_index += 1
+        if baidu_map_ak:
+            baidu_leads, baidu_errors = collect_baidu_map_leads(
+                baidu_map_ak,
+                regions,
+                sectors,
+                custom_keywords,
+                pages,
+                keyword_limit,
+                direction,
+                exclude_suppliers,
+                strict_upstream,
+                provider_progress(provider_index, amap_leads),
+                precision_mode=collection_strategy == "precision",
+            )
+            errors.extend(baidu_errors)
+        leads = merge_map_leads(amap_leads, baidu_leads)
+        if direction == "upstream" and not leads and strict_upstream:
+            relaxed_amap: list[Lead] = []
+            relaxed_baidu: list[Lead] = []
+            relaxed_errors: list[str] = []
+            if amap_key:
+                relaxed_amap, source_errors = collect_amap_leads(
+                    amap_key,
+                    regions,
+                    sectors,
+                    custom_keywords,
+                    pages,
+                    max(keyword_limit, 4),
+                    direction,
+                    exclude_suppliers,
+                    False,
+                    progress_callback,
+                    precision_mode=False,
+                )
+                relaxed_errors.extend(source_errors)
+            if baidu_map_ak:
+                relaxed_baidu, source_errors = collect_baidu_map_leads(
+                    baidu_map_ak,
+                    regions,
+                    sectors,
+                    custom_keywords,
+                    pages,
+                    max(keyword_limit, 4),
+                    direction,
+                    exclude_suppliers,
+                    False,
+                    progress_callback,
+                    precision_mode=False,
+                )
+                relaxed_errors.extend(source_errors)
+            relaxed_leads = merge_map_leads(relaxed_amap, relaxed_baidu)
             if relaxed_leads:
                 leads = relaxed_leads
                 errors.extend(relaxed_errors)
@@ -5374,7 +6727,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         if not leads:
             leads = fallback_leads(regions, sectors, custom_keywords, direction)
             used_fallback = True
-            errors.append("未采集到高德结果，已生成搜索任务清单。")
+            errors.append("未采集到地图企业结果，已生成搜索任务清单。")
     else:
         leads = fallback_leads(regions, sectors, custom_keywords, direction)
         used_fallback = True
@@ -5386,15 +6739,16 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         "errors": errors[:40],
         "meta": {
             "count": len(leads),
-            "companyCount": len([lead for lead in leads if lead.source == "高德 POI"]),
+            "companyCount": 0 if used_fallback else len(leads),
             "phoneCount": len([lead for lead in leads if lead.phone]),
             "requestCount": len(regions) * sum(
                 min(keyword_limit, len(item["keywords"]) + len(custom_keywords))
                 for item in sectors.values()
-            ) * max(1, min(pages, 10)),
-            "workers": AMAP_WORKERS,
+            ) * max(1, min(pages, 10)) * max(1, len(map_sources)),
+            "workers": max(AMAP_WORKERS, BAIDU_MAP_WORKERS),
             "fastMode": fast_mode,
             "direction": direction,
+            "mapSources": map_sources,
             "excludeSuppliers": exclude_suppliers,
             "strictUpstream": strict_upstream,
             "collectionStrategy": collection_strategy,
@@ -5404,10 +6758,14 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "mode": (
                 "task"
                 if used_fallback
+                else "maps"
+                if amap_key and baidu_map_ak
+                else "baidu"
+                if baidu_map_ak
                 else "amap"
                 if amap_key
                 else "need_key"
-                if require_amap
+                if require_map
                 else "task"
             ),
         },
@@ -5443,7 +6801,10 @@ def persist_search_result(result: dict[str, Any], job_id: str = "") -> dict[str,
     if result.get("meta", {}).get("mode") in {"task", "need_key"}:
         return {"created": 0, "updated": 0, "total": 0}
     try:
-        return save_leads(result.get("leads") or [])
+        leads = result.get("leads") or []
+        persistence = save_leads(leads)
+        attach_saved_lead_ids(leads)
+        return persistence
     except Exception as exc:  # noqa: BLE001 - keep collected leads visible when cloud DB is misconfigured.
         message = (
             f"采集已完成，但保存到数据库失败：{exc}。"
@@ -5545,6 +6906,7 @@ def monitor_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "procurement": "procurementSources",
         "environmental": "environmentalSources",
         "competitor": "competitorSources",
+        "social": "socialPlatforms",
     }
     sources = payload.get(source_fields.get(direction, ""), []) if direction in source_fields else []
     return {
@@ -5875,6 +7237,24 @@ def csv_bytes(leads: list[dict[str, Any]]) -> bytes:
         "competitor_regions",
         "competitor_keywords",
         "competitor_channels",
+        "social_platform",
+        "social_platform_id",
+        "social_account",
+        "social_account_url",
+        "social_content_type",
+        "social_matched_keywords",
+        "social_engagement",
+        "social_discovery_method",
+        "social_intent",
+        "social_intent_id",
+        "social_intent_score",
+        "social_intent_reasons",
+        "social_positive_hits",
+        "social_negative_hits",
+        "social_entity_candidate",
+        "social_entity_status",
+        "feedback_status",
+        "feedback_label",
         "evidence_count",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
@@ -6020,6 +7400,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "upstreamSectors": UPSTREAM_SECTOR_LIBRARY,
                     "competitorSectors": COMPETITOR_SECTOR_LIBRARY,
                     "competitorSources": COMPETITOR_SOURCE_LIBRARY,
+                    "socialSectors": SOCIAL_SECTOR_LIBRARY,
+                    "socialPlatforms": SOCIAL_PLATFORM_LIBRARY,
                     "environmentalSectors": FLUORIDE_SECTOR_LIBRARY,
                     "procurementSectors": PROCUREMENT_SECTOR_LIBRARY,
                     "procurementNoticeTypes": PROCUREMENT_NOTICE_TYPES,
@@ -6028,6 +7410,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     },
                     "regionPresets": REGION_PRESETS,
                     "hasEnvAmapKey": bool(os.getenv("AMAP_KEY")),
+                    "hasEnvBaiduMapAk": bool(os.getenv("BAIDU_MAP_AK")),
                     "tursoConfigured": turso_active(),
                     "tursoEnvConfigured": turso_configured(),
                     "tursoError": TURSO_RUNTIME_ERROR,
@@ -6395,6 +7778,38 @@ class AppHandler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True})
             return
 
+        if path == "/api/leads/social-feedback":
+            lead_id = int(payload.get("id") or 0)
+            try:
+                lead = update_social_feedback(
+                    lead_id,
+                    str(payload.get("status") or ""),
+                )
+            except ValueError as exc:
+                json_response(self, {"error": str(exc)}, 400)
+                return
+            except LookupError as exc:
+                json_response(self, {"error": str(exc)}, 404)
+                return
+            json_response(self, {"ok": True, "lead": lead})
+            return
+
+        if path == "/api/leads/social-entity":
+            lead_id = int(payload.get("id") or 0)
+            try:
+                lead = confirm_social_entity(
+                    lead_id,
+                    str(payload.get("company") or ""),
+                )
+            except ValueError as exc:
+                json_response(self, {"error": str(exc)}, 400)
+                return
+            except LookupError as exc:
+                json_response(self, {"error": str(exc)}, 404)
+                return
+            json_response(self, {"ok": True, "lead": lead})
+            return
+
         if path == "/api/leads/bulk-update":
             ids = [
                 int(value)
@@ -6563,7 +7978,11 @@ def main() -> None:
     if not sms_configured() and not SMS_DEV_MODE:
         print("WARNING: Aliyun PNVS is not configured. Verification codes cannot be sent.")
     if not os.getenv("AMAP_KEY"):
-        print("WARNING: AMAP_KEY is not set. Company collection will remain disabled.")
+        print("WARNING: AMAP_KEY is not set.")
+    if not os.getenv("BAIDU_MAP_AK"):
+        print("WARNING: BAIDU_MAP_AK is not set.")
+    if not os.getenv("AMAP_KEY") and not os.getenv("BAIDU_MAP_AK"):
+        print("WARNING: No map API key is set. Company collection will remain disabled.")
     server = AppServer((args.host, args.port), AppHandler)
     print(f"Calcium chloride buyer finder running at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")

@@ -11,6 +11,8 @@ services:
         sync: false
       - key: AMAP_KEY
         sync: false
+      - key: BAIDU_MAP_AK
+        sync: false
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
@@ -24,4 +26,6 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: AMAP_WORKERS
+        value: "4"
+      - key: BAIDU_MAP_WORKERS
         value: "4"

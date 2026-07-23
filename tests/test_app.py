@@ -3,7 +3,7 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import app
 
@@ -142,6 +142,169 @@ class LiquidCalciumAppTests(unittest.TestCase):
         )
         self.assertTrue(app.amap_region_matches("山东", "山东省", "济南市", "历下区"))
 
+    @patch("app.urlopen")
+    def test_baidu_map_search_uses_v3_region_and_zero_based_page(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = b'{"status":0,"message":"ok","results":[]}'
+        urlopen.return_value.__enter__.return_value = response
+
+        result = app.baidu_map_search("test-ak", "山东省济南市", "水处理公司", 2)
+
+        request = urlopen.call_args.args[0]
+        self.assertIn("/place/v3/region?", request.full_url)
+        self.assertIn("page_num=1", request.full_url)
+        self.assertIn("region_limit=true", request.full_url)
+        self.assertEqual(result["status"], 0)
+
+    @patch("app.baidu_map_search")
+    def test_baidu_map_collection_maps_company_phone_and_location(self, baidu_search):
+        baidu_search.return_value = {
+            "status": 0,
+            "message": "ok",
+            "results": [
+                {
+                    "uid": "baidu-001",
+                    "name": "济南工业水处理有限公司",
+                    "province": "山东省",
+                    "city": "济南市",
+                    "area": "历城区",
+                    "address": "工业北路1号",
+                    "telephone": "0531-88888888",
+                    "location": {"lat": 36.7, "lng": 117.1},
+                    "detail_info": {
+                        "classified_poi_tag": "公司企业;水处理",
+                        "new_alias": "济南工业水处理",
+                    },
+                }
+            ],
+        }
+
+        leads, errors = app.collect_baidu_map_leads(
+            "test-ak",
+            ["山东省济南市"],
+            {"water": app.SECTOR_LIBRARY["water"]},
+            [],
+            1,
+            1,
+            "downstream",
+            True,
+            True,
+            precision_mode=True,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].source, "百度地图 POI")
+        self.assertEqual(leads[0].phone, "0531-88888888")
+        self.assertEqual(leads[0].poi_id, "baidu-001")
+        self.assertEqual(leads[0].location, "117.1,36.7")
+        self.assertEqual(leads[0].alias, "济南工业水处理")
+
+    def test_map_sources_merge_contacts_and_evidence(self):
+        amap_lead = app.Lead(
+            company="双源水处理有限公司",
+            region="山东 济南",
+            sector="工业水处理",
+            source="高德 POI",
+            score=50,
+            phone="0531-11111111",
+            address="工业路1号",
+        )
+        baidu_lead = app.Lead(
+            company="双源水处理有限责任公司",
+            region="山东省 济南市",
+            sector="工业水处理",
+            source="百度地图 POI",
+            score=52,
+            phone="0531-22222222",
+            address="工业路1号",
+        )
+
+        merged = app.merge_map_leads([amap_lead], [baidu_lead])
+
+        self.assertEqual(len(merged), 1)
+        self.assertIn("高德 POI", merged[0].source)
+        self.assertIn("百度地图 POI", merged[0].source)
+        self.assertIn("0531-11111111", merged[0].phone)
+        self.assertIn("0531-22222222", merged[0].phone)
+        self.assertEqual(merged[0].evidence_count, 2)
+
+    @patch("app.collect_baidu_map_leads")
+    def test_collect_leads_can_run_with_only_baidu_map(self, collect_baidu):
+        collect_baidu.return_value = (
+            [
+                app.Lead(
+                    company="百度单源买家有限公司",
+                    region="山东",
+                    sector="工业水处理",
+                    source="百度地图 POI",
+                    score=50,
+                    phone="0531-66666666",
+                )
+            ],
+            [],
+        )
+
+        result = app.collect_leads(
+            {
+                "direction": "downstream",
+                "regions": ["山东"],
+                "sectors": ["water"],
+                "baiduMapAk": "test-ak",
+                "disableAmap": True,
+                "pages": 1,
+                "fastMode": True,
+                "requireMap": True,
+            }
+        )
+
+        self.assertEqual(result["meta"]["mode"], "baidu")
+        self.assertEqual(result["meta"]["mapSources"], ["百度地图"])
+        self.assertEqual(result["meta"]["companyCount"], 1)
+        self.assertEqual(result["leads"][0]["company"], "百度单源买家有限公司")
+
+    def test_baidu_map_error_messages_are_actionable(self):
+        self.assertIn("IP 白名单", app.baidu_map_error_message(210, "APP IP校验失败"))
+        self.assertIn("地点检索", app.baidu_map_error_message(240, "服务未开通"))
+        self.assertIn("额度", app.baidu_map_error_message(302, "配额不足"))
+
+    @patch("app.discover_company_website", return_value="")
+    @patch("app.baidu_map_search")
+    def test_company_website_discovery_accepts_baidu_without_amap(
+        self,
+        baidu_search,
+        _discover_website,
+    ):
+        baidu_search.return_value = {
+            "status": 0,
+            "results": [
+                {
+                    "name": "百度候选水务有限公司",
+                    "province": "山东省",
+                    "city": "济南市",
+                    "area": "历城区",
+                    "address": "工业路2号",
+                    "telephone": "0531-77777777",
+                    "detail_info": {"classified_poi_tag": "公司企业;水务"},
+                }
+            ],
+        }
+
+        leads, errors, requests = app.collect_company_website_notices(
+            "",
+            "test-ak",
+            ["山东"],
+            {"water": app.PROCUREMENT_SECTOR_LIBRARY["water_treatment"]},
+            [],
+            ["purchase"],
+            "10d",
+        )
+
+        self.assertEqual(leads, [])
+        self.assertEqual(errors, [])
+        self.assertGreater(requests, 0)
+        self.assertTrue(baidu_search.called)
+
     def test_precision_mode_rejects_storefront_pois(self):
         self.assertFalse(
             app.likely_downstream_company(
@@ -155,6 +318,286 @@ class LiquidCalciumAppTests(unittest.TestCase):
                 "公司企业;公司;环保科技",
             )
         )
+
+    def test_social_platform_identification_uses_exact_domain_boundaries(self):
+        platform_id, platform = app.identify_social_platform(
+            "https://www.douyin.com/video/123"
+        )
+        self.assertEqual(platform_id, "douyin")
+        self.assertEqual(platform["name"], "抖音")
+        self.assertEqual(
+            app.identify_social_platform("https://douyin.com.evil.example/video/123"),
+            (None, None),
+        )
+        self.assertEqual(
+            app.identify_social_platform("javascript:alert(1)"),
+            (None, None),
+        )
+        self.assertEqual(
+            app.social_account_from_text("山东液体氯化钙 - 抖音", "抖音"),
+            "",
+        )
+        self.assertEqual(
+            app.social_account_from_text(
+                "山东海合化工有限公司于20241223发布在抖音", "抖音"
+            ),
+            "山东海合化工有限公司",
+        )
+        self.assertEqual(
+            app.social_account_from_text(
+                "山东液体氯化钙价格，就找润弘化工，库存充足", "抖音"
+            ),
+            "润弘化工",
+        )
+        self.assertEqual(
+            app.social_public_phones("联系济南坤丰化工13275413810"),
+            "13275413810",
+        )
+        self.assertEqual(
+            app.social_engagement_from_text("7130个喜欢，4659次观看"),
+            "7130个喜欢；4659次观看",
+        )
+
+    def test_social_metadata_and_link_import_are_platform_specific(self):
+        page = """
+        <html><head>
+          <meta property="og:title" content="山东清源化工发布的液体氯化钙供应视频 - 抖音">
+          <meta property="og:description" content="副产液钙，浓度30%，山东潍坊可发槽车">
+          <meta name="author" content="山东清源化工">
+        </head></html>
+        """
+        with patch("app.fetch_html", return_value=page):
+            lead, warning = app.social_link_lead(
+                "https://www.douyin.com/video/123",
+                app.selected_sectors(["liquid_calcium", "byproduct"], "social"),
+                [],
+            )
+
+        self.assertEqual(warning, "")
+        self.assertEqual(lead.social_platform_id, "douyin")
+        self.assertEqual(lead.social_platform, "抖音")
+        self.assertEqual(lead.social_account, "山东清源化工")
+        self.assertIn("液体氯化钙", lead.social_matched_keywords)
+        prepared = app.prepare_lead_payload(lead)
+        self.assertEqual(prepared["quality_grade"], "B")
+        self.assertTrue(prepared["actionable"])
+
+    def test_social_collection_merges_same_account_but_separates_platforms(self):
+        douyin_key = app.lead_dedupe_key(
+            {
+                "company": "山东清源化工",
+                "direction": "social",
+                "social_platform_id": "douyin",
+                "social_account": "山东清源化工",
+            }
+        )
+        kuaishou_key = app.lead_dedupe_key(
+            {
+                "company": "山东清源化工",
+                "direction": "social",
+                "social_platform_id": "kuaishou",
+                "social_account": "山东清源化工",
+            }
+        )
+        self.assertNotEqual(douyin_key, kuaishou_key)
+        result_page = """
+        <li class="res-list"><h3><a>山东清源化工的视频 - 抖音</a></h3>
+        <a data-mdurl="https://www.douyin.com/video/1"></a>
+        <p class="res-desc">山东液体氯化钙供应，副产液钙处置</p></li>
+        <li class="res-list"><h3><a>山东清源化工的视频 - 抖音</a></h3>
+        <a data-mdurl="https://www.douyin.com/video/2"></a>
+        <p class="res-desc">液体氯化钙槽车供应</p></li>
+        """
+        with patch("app.fetch_html", return_value=result_page):
+            leads, errors, requests = app.collect_social_leads(
+                ["山东"],
+                app.selected_sectors(["liquid_calcium", "byproduct"], "social"),
+                ["douyin"],
+                [],
+                [],
+                "precision",
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(requests, 1)
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].social_platform, "抖音")
+        self.assertEqual(leads[0].evidence_count, 2)
+
+    def test_collect_leads_social_mode_returns_platform_metadata(self):
+        mock_lead = app.Lead(
+            company="清源化工",
+            region="山东",
+            sector="液体氯化钙供需",
+            source="抖音公开索引",
+            score=48,
+            direction="social",
+            search_url="https://www.douyin.com/video/1",
+            match_reason="液体氯化钙",
+            social_platform="抖音",
+            social_platform_id="douyin",
+            social_account="清源化工",
+            social_discovery_method="公开索引监控",
+            evidence_count=1,
+        )
+        with patch(
+            "app.collect_social_leads",
+            return_value=([mock_lead], [], 1),
+        ):
+            result = app.collect_leads(
+                {
+                    "direction": "social",
+                    "regions": ["山东"],
+                    "sectors": ["liquid_calcium"],
+                    "socialPlatforms": ["douyin"],
+                }
+            )
+
+        self.assertEqual(result["meta"]["mode"], "social")
+        self.assertEqual(result["meta"]["socialPlatforms"], ["douyin"])
+        self.assertEqual(result["leads"][0]["social_platform"], "抖音")
+
+    def test_social_intent_classification_is_explainable(self):
+        purchase = app.classify_social_intent(
+            "长期求购液体氯化钙，每月500吨，槽车运输", "13800138000"
+        )
+        disposal = app.classify_social_intent(
+            "环氧氯丙烷工艺副产液钙，长期外售处置"
+        )
+        fluoride = app.classify_social_intent(
+            "含氟废水氟化物超标，需要除氟改造"
+        )
+
+        self.assertEqual(purchase["id"], "purchase")
+        self.assertEqual(purchase["role"], "buyer")
+        self.assertGreaterEqual(purchase["score"], 70)
+        self.assertIn("求购", purchase["reasons"])
+        self.assertEqual(disposal["id"], "disposal")
+        self.assertEqual(disposal["role"], "supplier")
+        self.assertEqual(fluoride["id"], "fluoride_need")
+
+    def test_legacy_social_lead_is_enriched_when_read(self):
+        app.save_leads(
+            [
+                {
+                    "company": "历史液钙账号",
+                    "direction": "social",
+                    "region": "河南",
+                    "sector": "液体氯化钙供需",
+                    "source": "抖音公开索引",
+                    "score": 48,
+                    "project_title": "焦作副产液体氯化钙长期外售处置",
+                    "social_platform": "抖音",
+                    "social_account": "历史液钙账号",
+                    "match_reason": "副产液钙公开内容",
+                }
+            ]
+        )
+
+        saved = app.list_saved_leads({"q": "历史液钙账号"})[0]
+
+        self.assertEqual(saved["social_intent_id"], "disposal")
+        self.assertGreaterEqual(saved["social_intent_score"], 70)
+        self.assertEqual(saved["opportunity_role"], "supplier")
+        self.assertEqual(saved["social_entity_status"], "待确认")
+
+    def test_social_negative_keyword_filters_public_result(self):
+        result_page = """
+        <li class="res-list"><h3><a>液体氯化钙实验教学 - 抖音</a></h3>
+        <a data-mdurl="https://www.douyin.com/video/teaching"></a>
+        <p class="res-desc">个人分享化学试剂实验教学</p></li>
+        """
+        with patch("app.fetch_html", return_value=result_page):
+            leads, errors, _ = app.collect_social_leads(
+                ["山东"],
+                app.selected_sectors(["liquid_calcium"], "social"),
+                ["douyin"],
+                [],
+                [],
+                "precision",
+                negative_keywords=["实验教学", "个人分享"],
+            )
+
+        self.assertEqual(leads, [])
+        self.assertEqual(errors, [])
+
+    def test_social_feedback_persists_and_teaches_exact_url(self):
+        lead = {
+            "company": "山东清源化工",
+            "direction": "social",
+            "region": "山东",
+            "sector": "液体氯化钙供需",
+            "source": "抖音公开索引",
+            "score": 50,
+            "search_url": "https://www.douyin.com/video/feedback-test",
+            "social_platform": "抖音",
+            "social_platform_id": "douyin",
+            "social_account": "山东清源化工",
+            "match_reason": "液体氯化钙求购",
+        }
+        app.save_leads([lead])
+        saved = app.list_saved_leads({"q": "山东清源化工"})[0]
+
+        updated = app.update_social_feedback(saved["id"], "irrelevant")
+        rules = app.social_feedback_rules()
+
+        self.assertEqual(updated["feedback_status"], "irrelevant")
+        self.assertEqual(updated["quality_grade"], "D")
+        self.assertIn(
+            "https://www.douyin.com/video/feedback-test",
+            rules["excluded_urls"],
+        )
+
+    def test_confirm_social_entity_updates_company_profile(self):
+        lead = {
+            "company": "待识别账号",
+            "direction": "social",
+            "region": "山东",
+            "sector": "副产液钙/处置",
+            "source": "快手公开索引",
+            "score": 44,
+            "search_url": "https://www.kuaishou.com/short-video/entity-test",
+            "social_platform": "快手",
+            "social_platform_id": "kuaishou",
+            "social_account": "待识别账号",
+            "match_reason": "副产液钙处置",
+        }
+        app.save_leads([lead])
+        saved = app.list_saved_leads({"direction": "social"})[0]
+
+        confirmed = app.confirm_social_entity(
+            saved["id"], "山东清源环保科技有限公司"
+        )
+
+        self.assertEqual(confirmed["company"], "山东清源环保科技有限公司")
+        self.assertEqual(confirmed["social_entity_status"], "已确认")
+        self.assertEqual(confirmed["quality_grade"], "A")
+        self.assertIn("qcc.com", confirmed["qcc_url"])
+
+    def test_persist_search_result_attaches_saved_ids(self):
+        result = {
+            "leads": [
+                app.prepare_lead_payload(
+                    {
+                        "company": "测试社媒企业",
+                        "direction": "social",
+                        "source": "微博公开索引",
+                        "score": 46,
+                        "search_url": "https://weibo.com/123/test",
+                        "social_platform": "微博",
+                        "social_platform_id": "weibo",
+                        "social_account": "测试社媒企业",
+                        "match_reason": "液体氯化钙采购",
+                    }
+                )
+            ],
+            "meta": {"mode": "social"},
+        }
+
+        persistence = app.persist_search_result(result)
+
+        self.assertEqual(persistence["created"], 1)
+        self.assertGreater(result["leads"][0]["id"], 0)
 
     def test_system_events_and_database_backup(self):
         app.log_system_event(

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=precision-workflow-1" />
+    <link rel="stylesheet" href="/styles.css?v=macos-ui-1" />
   </head>
   <body>
     <div class="app">
@@ -40,6 +40,10 @@
               <label>
                 <input type="radio" name="direction" value="competitor" />
                 <span>竞品/同行客户挖掘</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="social" />
+                <span>社媒线索雷达</span>
               </label>
             </div>
             <div id="direction-note" class="direction-note">
@@ -223,6 +227,36 @@
                 只读取无需登录的公开页面和搜索索引，不绕过验证码；结果需打开证据页核验。
               </div>
             </div>
+            <div id="social-options" class="procurement-options" hidden>
+              <div class="section-title">公开平台</div>
+              <div class="notice-type-grid social-platform-grid">
+                <label><input type="checkbox" name="socialPlatform" value="douyin" checked />抖音</label>
+                <label><input type="checkbox" name="socialPlatform" value="kuaishou" checked />快手</label>
+                <label><input type="checkbox" name="socialPlatform" value="xiaohongshu" checked />小红书</label>
+                <label><input type="checkbox" name="socialPlatform" value="bilibili" checked />哔哩哔哩</label>
+                <label><input type="checkbox" name="socialPlatform" value="weibo" checked />微博</label>
+                <label><input type="checkbox" name="socialPlatform" value="wechat" checked />公众号/视频号</label>
+                <label><input type="checkbox" name="socialPlatform" value="toutiao" checked />今日头条</label>
+                <label><input type="checkbox" name="socialPlatform" value="zhihu" checked />知乎</label>
+              </div>
+              <div class="social-rule-grid">
+                <label class="field">
+                  <span>重点意向词（可选）</span>
+                  <textarea id="social-positive-keywords" rows="3" placeholder="例如：求购, 长期采购, 副产液钙处置, 除氟改造"></textarea>
+                </label>
+                <label class="field">
+                  <span>排除词</span>
+                  <textarea id="social-negative-keywords" rows="3">实验教学, 个人分享, 招聘, 零售小包装, 家庭除湿, 化学试剂, 宠物用品</textarea>
+                </label>
+              </div>
+              <label class="field">
+                <span>补充指定链接（可选，不填也能检索）</span>
+                <textarea id="social-links" rows="6" placeholder="https://www.douyin.com/...&#10;https://www.kuaishou.com/...&#10;https://www.xiaohongshu.com/..."></textarea>
+              </label>
+              <div class="direction-note">
+                无需提供链接：选择地区、主题和平台即可直接检索。系统只处理公开搜索索引，不读取私信、评论区或非公开账号。
+              </div>
+            </div>
           </section>
 
           <button class="primary" type="submit">
@@ -233,9 +267,21 @@
 
       <main class="main">
         <header class="topbar">
-          <div>
-            <div class="eyebrow">Lead cockpit</div>
-            <h2 id="result-title">潜在买家列表</h2>
+          <div class="topbar-title">
+            <button
+              id="sidebar-toggle"
+              class="toolbar-icon"
+              type="button"
+              aria-label="隐藏采集条件"
+              aria-expanded="true"
+              title="显示或隐藏采集条件"
+            >
+              <span class="sidebar-symbol" aria-hidden="true"><i></i></span>
+            </button>
+            <div>
+              <div class="eyebrow">Lead cockpit</div>
+              <h2 id="result-title">潜在买家列表</h2>
+            </div>
           </div>
           <div class="actions">
             <button id="save-monitor-button" class="secondary" type="button">保存为监控</button>
@@ -328,6 +374,7 @@
                 <option value="procurement">招采信息</option>
                 <option value="environmental">含氟企业</option>
                 <option value="competitor">竞品情报</option>
+                <option value="social">社媒线索</option>
               </select>
             </label>
           </div>
@@ -477,6 +524,26 @@
         <button id="detail-close" class="icon-button" type="button" aria-label="关闭">×</button>
       </div>
       <div id="detail-grid" class="detail-grid"></div>
+      <section id="social-review-panel" class="social-review-panel" hidden>
+        <div class="social-review-head">
+          <div>
+            <strong>线索判断</strong>
+            <span id="social-feedback-state">尚未反馈</span>
+          </div>
+          <div class="social-feedback-actions">
+            <button type="button" data-social-feedback="valid">有效</button>
+            <button type="button" data-social-feedback="irrelevant">无关</button>
+            <button type="button" data-social-feedback="duplicate">重复</button>
+          </div>
+        </div>
+        <div class="social-entity-confirm">
+          <label class="field">
+            <span>对应企业主体</span>
+            <input id="social-entity-candidate" type="text" placeholder="输入完整企业名称后确认" />
+          </label>
+          <button id="social-entity-confirm" class="secondary" type="button">确认并进入公司档案</button>
+        </div>
+      </section>
       <form id="sales-form" class="sales-form" hidden>
         <input id="sales-lead-id" type="hidden" />
         <label class="field">
@@ -561,6 +628,7 @@
             <option value="procurement">招投标/采购</option>
             <option value="environmental">含氟废水企业</option>
             <option value="competitor">竞品/同行情报</option>
+            <option value="social">社媒线索雷达</option>
           </select>
         </label>
         <label class="field">
@@ -686,6 +754,7 @@
             <option value="procurement">招投标/采购</option>
             <option value="environmental">含氟废水企业</option>
             <option value="competitor">竞品/同行情报</option>
+            <option value="social">社媒线索雷达</option>
           </select>
         </label>
         <div class="monitor-option-block">
@@ -709,6 +778,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=precision-workflow-1"></script>
+    <script src="/app.js?v=macos-ui-1"></script>
   </body>
 </html>

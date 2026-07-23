@@ -1,3 +1,5 @@
+document.documentElement.classList.add("motion-ready");
+
 const form = document.querySelector("#login-form");
 const phone = document.querySelector("#phone");
 const password = document.querySelector("#password");
@@ -6,6 +8,19 @@ const sendCode = document.querySelector("#send-code");
 const status = document.querySelector("#login-status");
 const error = document.querySelector("#login-error");
 let countdownTimer = null;
+
+const loginMessageObserver = new MutationObserver((entries) => {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  entries.forEach((entry) => {
+    const element = entry.target;
+    if (!element.textContent.trim()) return;
+    element.classList.remove("notice-bump");
+    void element.offsetWidth;
+    element.classList.add("notice-bump");
+  });
+});
+loginMessageObserver.observe(status, { childList: true });
+loginMessageObserver.observe(error, { childList: true });
 
 function normalizedPhone() {
   return phone.value.replace(/\D/g, "").replace(/^86(?=1\d{10}$)/, "");
@@ -67,7 +82,7 @@ sendCode.addEventListener("click", async () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   button.textContent = "登录中...";
   error.textContent = "";
