@@ -81,6 +81,10 @@ button {
   margin-bottom: 28px;
 }
 
+.mobile-results-button {
+  display: none;
+}
+
 .mark {
   display: grid;
   place-items: center;
@@ -562,6 +566,10 @@ h2 {
   gap: 8px;
 }
 
+.work-queue-field {
+  min-width: 156px;
+}
+
 .field.compact {
   min-width: 130px;
 }
@@ -632,6 +640,47 @@ h2 {
   margin-right: 4px;
   color: var(--ink);
   font-size: 16px;
+}
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pagination-actions,
+.pagination-actions label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pagination-actions select {
+  min-height: 34px;
+  padding: 5px 26px 5px 9px;
+}
+
+.pagination-actions .icon-button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.pagination-actions strong {
+  min-width: 58px;
+  color: var(--ink);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .bulk-toolbar {
@@ -1233,10 +1282,13 @@ tbody tr:hover {
 }
 
 .profile-status-card {
+  width: 100%;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--soft);
+  text-align: left;
+  cursor: pointer;
 }
 
 .profile-status-card span {
@@ -2421,11 +2473,7 @@ th {
   }
 
   .app.sidebar-collapsed .sidebar {
-    overflow-y: auto;
-    padding: 26px;
-    opacity: 1;
-    pointer-events: auto;
-    transform: none;
+    display: none;
   }
 
   .topbar {
@@ -2438,7 +2486,7 @@ th {
   }
 
   .toolbar-icon {
-    display: none;
+    display: grid;
   }
 
   .metrics {
@@ -2483,6 +2531,25 @@ th {
     padding: 18px;
   }
 
+  .brand {
+    align-items: flex-start;
+  }
+
+  .mobile-results-button {
+    display: inline-flex;
+    min-height: 34px;
+    margin-left: auto;
+    padding: 0 10px;
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--accent-dark);
+    background: #fff;
+    font-size: 12px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
   .region-grid,
   .direction-control,
   .notice-type-grid,
@@ -2514,6 +2581,15 @@ th {
   .bulk-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pagination-actions {
+    justify-content: space-between;
   }
 
   .sales-notes,

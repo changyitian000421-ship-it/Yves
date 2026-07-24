@@ -21,6 +21,11 @@ const state = {
   notifications: [],
   currentLead: null,
   selectedLeadIds: new Set(),
+  pageItems: [],
+  pageSize: 50,
+  pages: { database: 1, profiles: 1 },
+  leadStoreLoadedAt: 0,
+  runningMonitorPolls: new Set(),
   system: {},
   hasEnvAmapKey: false,
   hasEnvBaiduMapAk: false,
@@ -73,6 +78,9 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const desktopWorkspace = window.matchMedia("(min-width: 981px)");
 const SIDEBAR_STORAGE_KEY = "lead-cockpit-sidebar-collapsed";
+const SEARCH_DRAFT_STORAGE_KEY = "lead-cockpit-search-drafts-v1";
+const LEAD_STORE_TTL_MS = 60000;
+let filterRenderTimer = 0;
 
 function replayMotion(element, className) {
   if (!element || reducedMotion.matches) return;
@@ -169,7 +177,7 @@ function setSidebarCollapsed(collapsed, persist = true) {
   const button = $("#sidebar-toggle");
   if (!app || !button) return;
   app.classList.toggle("sidebar-collapsed", Boolean(collapsed));
-  const expanded = !collapsed || !desktopWorkspace.matches;
+  const expanded = !collapsed;
   button.setAttribute("aria-expanded", String(expanded));
   button.setAttribute("aria-label", expanded ? "隐藏采集条件" : "显示采集条件");
   button.title = `${expanded ? "隐藏" : "显示"}采集条件`;
@@ -193,6 +201,10 @@ function setupWorkspaceChrome() {
   setSidebarCollapsed(collapsed, false);
   $("#sidebar-toggle")?.addEventListener("click", () => {
     setSidebarCollapsed(!$(".app").classList.contains("sidebar-collapsed"));
+  });
+  $("#mobile-results-button")?.addEventListener("click", () => {
+    setSidebarCollapsed(true);
+    window.scrollTo({ top: 0, behavior: reducedMotion.matches ? "auto" : "smooth" });
   });
   document.addEventListener("keydown", (event) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
@@ -398,6 +410,62 @@ function leadMatches(lead, query) {
   return haystack.includes(query.toLowerCase());
 }
 
+function localDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function workQueueMatches(lead) {
+  const queue = $("#work-queue-filter")?.value || "";
+  if (!queue || !["database", "profiles"].includes(state.view)) return true;
+  const status = lead.sales_status || "new";
+  if (queue === "due") {
+    return Boolean(lead.next_follow_up)
+      && String(lead.next_follow_up).slice(0, 10) <= localDateKey()
+      && !["won", "lost"].includes(status);
+  }
+  if (queue === "hot-new") return Number(lead.score || 0) >= 70 && status === "new";
+  if (queue === "unassigned") return !String(lead.owner || "").trim() && !["won", "lost"].includes(status);
+  if (queue === "new") return status === "new";
+  if (queue === "needs-contact") return !lead.phone && !lead.email;
+  return true;
+}
+
+function currentPageKey() {
+  return state.view === "profiles" ? "profiles" : "database";
+}
+
+function resetCurrentPage() {
+  if (["database", "profiles"].includes(state.view)) {
+    state.pages[currentPageKey()] = 1;
+  }
+}
+
+function renderPagination(total) {
+  const panel = $("#pagination");
+  const enabled = ["database", "profiles"].includes(state.view) && total > 0;
+  panel.hidden = !enabled;
+  if (!enabled) {
+    state.pageItems = state.filtered;
+    return state.filtered;
+  }
+  const key = currentPageKey();
+  const pageCount = Math.max(1, Math.ceil(total / state.pageSize));
+  state.pages[key] = Math.min(Math.max(1, state.pages[key] || 1), pageCount);
+  const page = state.pages[key];
+  const start = (page - 1) * state.pageSize;
+  const end = Math.min(total, start + state.pageSize);
+  state.pageItems = state.filtered.slice(start, end);
+  $("#pagination-summary").textContent = `共 ${total} 条，当前 ${start + 1}-${end}`;
+  $("#page-current").textContent = `${page} / ${pageCount}`;
+  $("#page-prev").disabled = page <= 1;
+  $("#page-next").disabled = page >= pageCount;
+  $("#page-size").value = String(state.pageSize);
+  return state.pageItems;
+}
+
 function scoreClass(score) {
   if (score >= 70) return "score";
   if (score >= 50) return "score mid";
@@ -442,7 +510,7 @@ async function copyText(value) {
 
 function renderMetrics(leads) {
   if (state.view === "profiles") {
-    const source = state.profileFiltered.length || $("#filter")?.value || $("#status-filter")?.value || $("#direction-filter")?.value
+    const source = state.profileFiltered.length || $("#filter")?.value || $("#status-filter")?.value || $("#direction-filter")?.value || $("#work-queue-filter")?.value
       ? state.profileFiltered
       : state.profiles;
     $("#metric-count").textContent = source.length;
@@ -453,6 +521,21 @@ function renderMetrics(leads) {
     $("#metric-phone-label").textContent = "已排跟进";
     $("#metric-mode").textContent = source.filter((lead) => lead.sales_status === "won").length;
     $("#metric-mode-label").textContent = "已成交";
+    return;
+  }
+  if (state.view === "database") {
+    $("#metric-count").textContent = leads.length;
+    $("#metric-hot").textContent = leads.filter((lead) => Number(lead.score || 0) >= 70).length;
+    $("#metric-phone").textContent = leads.filter((lead) => (
+      lead.next_follow_up
+      && String(lead.next_follow_up).slice(0, 10) <= localDateKey()
+      && !["won", "lost"].includes(lead.sales_status || "new")
+    )).length;
+    $("#metric-count-label").textContent = "当前线索";
+    $("#metric-hot-label").textContent = "高潜线索";
+    $("#metric-phone-label").textContent = "到期跟进";
+    $("#metric-mode").textContent = leads.filter((lead) => lead.phone || lead.email).length;
+    $("#metric-mode-label").textContent = "可联系";
     return;
   }
   if (state.view !== "collect") {
@@ -513,6 +596,7 @@ function renderLeads() {
   state.filtered = source.filter((lead) => {
     if (state.view === "database" && status && lead.sales_status !== status) return false;
     if (state.view === "database" && direction && lead.direction !== direction) return false;
+    if (!workQueueMatches(lead)) return false;
     return leadMatches(lead, query);
   });
   renderMetrics(state.filtered);
@@ -521,19 +605,25 @@ function renderLeads() {
   const tbody = $("#lead-body");
   if (!state.filtered.length) {
     tbody.innerHTML = `<tr class="empty-row"><td colspan="9">没有匹配的线索。</td></tr>`;
+    renderPagination(0);
     updateBulkToolbar();
     return;
   }
 
-  tbody.innerHTML = state.filtered
+  const displayedLeads = renderPagination(state.filtered.length);
+  const pageStart = state.view === "database"
+    ? (state.pages.database - 1) * state.pageSize
+    : 0;
+  tbody.innerHTML = displayedLeads
     .map((lead, index) => {
+      const absoluteIndex = pageStart + index;
       const environmental = lead.direction === "environmental";
       const competitor = lead.direction === "competitor";
       const social = lead.direction === "social";
       const phone = lead.phone || "待补充";
       const phoneContent = lead.phone
-        ? `<button class="phone-button" type="button" data-detail-index="${index}" title="查看电话和企业资料">${escapeHtml(lead.phone)}</button>`
-        : `<button class="phone-button missing" type="button" data-detail-index="${index}" title="查看企业资料">待补充</button>`;
+        ? `<button class="phone-button" type="button" data-detail-index="${absoluteIndex}" title="查看电话和企业资料">${escapeHtml(lead.phone)}</button>`
+        : `<button class="phone-button missing" type="button" data-detail-index="${absoluteIndex}" title="查看企业资料">待补充</button>`;
       const contactOrSource = social
         ? `${lead.social_platform || "未知平台"} · ${lead.evidence_count || 1} 条`
         : competitor
@@ -559,9 +649,9 @@ function renderLeads() {
       const qcc = lead.qcc_url
         ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公司核验" : "企查查"}</a>`
         : "";
-      const detail = `<button class="detail-button" type="button" data-detail-index="${index}">详情</button>`;
+      const detail = `<button class="detail-button" type="button" data-detail-index="${absoluteIndex}">详情</button>`;
       const reverseAction = competitor
-        ? `<button class="detail-button reverse-button" type="button" data-reverse-index="${index}">反向开发</button>`
+        ? `<button class="detail-button reverse-button" type="button" data-reverse-index="${absoluteIndex}">反向开发</button>`
         : "";
       const confidence = lead.confidence
         ? `<span class="confidence confidence-${lead.confidence === "高" ? "high" : lead.confidence === "中" ? "medium" : "review"}">${escapeHtml(lead.confidence)}${lead.confidence.startsWith("官方") ? "" : "相关"}</span>`
@@ -585,7 +675,7 @@ function renderLeads() {
         ? `<div class="subline">${lead.owner ? `负责人：${escapeHtml(lead.owner)}` : "暂未分配"}${lead.next_follow_up ? ` · 跟进：${escapeHtml(lead.next_follow_up.replace("T", " "))}` : ""}</div>`
         : "";
       const databaseAction = state.view === "database"
-        ? `<button class="detail-button" type="button" data-detail-index="${index}">跟进</button>`
+        ? `<button class="detail-button" type="button" data-detail-index="${absoluteIndex}">跟进</button>`
         : detail;
       const roleLabels = {
         buyer: "液钙买家",
@@ -608,7 +698,7 @@ function renderLeads() {
             ${scoreDetails ? `<div class="score-breakdown">${escapeHtml(scoreDetails)}</div>` : ""}
           </td>
           <td>
-            <button class="company company-button" type="button" data-detail-index="${index}" title="查看公司信息、电话和证据">
+            <button class="company company-button" type="button" data-detail-index="${absoluteIndex}" title="查看公司信息、电话和证据">
               ${escapeHtml(lead.company)}
             </button>
             ${salesStatus}
@@ -688,12 +778,24 @@ async function loadDashboard() {
   $("#profile-count").textContent = state.dashboard.total || 0;
   $("#alert-count").textContent = state.dashboard.unreadNotifications || 0;
   $("#system-count").textContent = state.dashboard.unresolvedEvents || 0;
-  if (state.view !== "collect") renderMetrics([]);
+  if (state.view === "database") renderMetrics(state.filtered);
+  else if (state.view === "profiles") renderMetrics(state.profileFiltered);
+  else if (state.view !== "collect") renderMetrics([]);
 }
 
-async function loadSavedLeads() {
+async function loadLeadStore(force = false) {
+  const fresh = state.leadStoreLoadedAt
+    && Date.now() - state.leadStoreLoadedAt < LEAD_STORE_TTL_MS;
+  if (!force && fresh) return;
   const data = await fetchJson("/api/leads?limit=5000");
-  state.savedLeads = data.leads || [];
+  const leads = data.leads || [];
+  state.savedLeads = leads;
+  state.profiles = leads;
+  state.leadStoreLoadedAt = Date.now();
+}
+
+async function loadSavedLeads(force = false) {
+  await loadLeadStore(force);
   $("#export-button").disabled = !state.savedLeads.length;
   renderLeads();
 }
@@ -704,10 +806,10 @@ function renderProfileStatusBoard() {
     return acc;
   }, {});
   $("#profile-status-board").innerHTML = SALES_STATUS_ORDER.map((key) => `
-    <div class="profile-status-card">
+    <button class="profile-status-card" type="button" data-profile-status="${escapeHtml(key)}" title="只看${escapeHtml(SALES_STATUS_LABELS[key])}">
       <span>${counts[key] || 0}</span>
       <p>${escapeHtml(SALES_STATUS_LABELS[key])}</p>
-    </div>
+    </button>
   `).join("");
 }
 
@@ -718,6 +820,7 @@ function renderProfiles() {
   state.profileFiltered = state.profiles.filter((lead) => {
     if (status && lead.sales_status !== status) return false;
     if (direction && lead.direction !== direction) return false;
+    if (!workQueueMatches(lead)) return false;
     return leadMatches(lead, query);
   });
   state.filtered = state.profileFiltered;
@@ -728,6 +831,7 @@ function renderProfiles() {
   const list = $("#profile-list");
   if (!state.profileFiltered.length) {
     list.innerHTML = `<div class="empty-state">没有匹配的公司档案，可以点击右上角手动新增。</div>`;
+    renderPagination(0);
     return;
   }
   const roleLabels = {
@@ -735,7 +839,10 @@ function renderProfiles() {
     supplier: "液钙货源",
     prospect: "工艺候选",
   };
-  list.innerHTML = state.profileFiltered.map((lead, index) => {
+  const displayedProfiles = renderPagination(state.profileFiltered.length);
+  const pageStart = (state.pages.profiles - 1) * state.pageSize;
+  list.innerHTML = displayedProfiles.map((lead, index) => {
+    const absoluteIndex = pageStart + index;
     const statusKey = lead.sales_status || "new";
     const phone = lead.phone
       ? `<a href="${escapeHtml(telHref(splitPhones(lead.phone)[0] || lead.phone))}">${escapeHtml(lead.phone)}</a>`
@@ -768,7 +875,7 @@ function renderProfiles() {
           </div>
         </div>
         <div class="profile-actions">
-          <button class="secondary" type="button" data-profile-detail-index="${index}">查看/跟进</button>
+          <button class="secondary" type="button" data-profile-detail-index="${absoluteIndex}">查看/跟进</button>
         </div>
       </article>
     `;
@@ -780,9 +887,8 @@ function renderCurrentResults() {
   else renderLeads();
 }
 
-async function loadProfiles() {
-  const data = await fetchJson("/api/leads?limit=5000");
-  state.profiles = data.leads || [];
+async function loadProfiles(force = false) {
+  await loadLeadStore(force);
   $("#profile-count").textContent = state.profiles.length;
   $("#export-button").disabled = !state.profiles.length;
   renderProfiles();
@@ -829,7 +935,7 @@ async function saveProfile(event) {
       }),
     });
     await closeDialogSmooth($("#profile-dialog"));
-    await Promise.all([loadProfiles(), loadDashboard()]);
+    await Promise.all([loadProfiles(true), loadDashboard()]);
     setNotice("公司档案已保存，重复公司会自动合并。");
   } catch (error) {
     setNotice(error.message || "档案保存失败", true);
@@ -848,19 +954,20 @@ function monitorDirection(monitor) {
 }
 
 function renderMonitorCard(monitor) {
+  const running = Boolean(monitor.running);
+  const stateLabel = running ? "执行中" : monitor.enabled ? "已启用" : "已暂停";
   return `
     <article class="monitor-row">
       <div>
         <div class="monitor-title">
           ${escapeHtml(monitor.name)}
-          <span class="monitor-state ${monitor.enabled ? "enabled" : ""}">${monitor.enabled ? "运行中" : "已暂停"}</span>
+          <span class="monitor-state ${monitor.enabled || running ? "enabled" : ""}">${stateLabel}</span>
         </div>
         <p>${escapeHtml(monitor.summary || `每 ${monitor.intervalHours} 小时 · 下次 ${formatDateTime(monitor.nextRun)}`)}</p>
-        <p>每 ${escapeHtml(monitor.intervalHours)} 小时 · 下次 ${escapeHtml(formatDateTime(monitor.nextRun))}</p>
         <p>${escapeHtml(monitor.lastResult || monitor.lastError || "等待首次检查")}</p>
       </div>
       <div class="row-actions">
-        <button type="button" data-monitor-run="${monitor.id}" title="立即运行">运行</button>
+        <button type="button" data-monitor-run="${monitor.id}" title="立即运行" ${running ? "disabled" : ""}>${running ? "执行中" : "运行"}</button>
         <button type="button" data-monitor-toggle="${monitor.id}" data-enabled="${monitor.enabled ? "0" : "1"}">${monitor.enabled ? "暂停" : "启用"}</button>
         <button type="button" data-monitor-delete="${monitor.id}" class="danger-link">删除</button>
       </div>
@@ -1005,6 +1112,7 @@ async function switchView(view) {
   $(".filters").hidden = alerts || system;
   $("#notice").hidden = alerts || system;
   $("#quality-summary").hidden = alerts || system;
+  $("#pagination").hidden = alerts || system || state.view === "collect";
   $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
   $("#progress-panel").hidden = alerts || system || !state.activeJobId;
   $("#quick-filters").hidden = database || profiles;
@@ -1074,6 +1182,64 @@ function buildPayload() {
     dateWindow: $("#date-window").value,
     collectionStrategy: selectedCollectionStrategy(),
   };
+}
+
+function setCheckedValues(name, values = []) {
+  const selected = new Set(values);
+  $$(`input[name="${name}"]`).forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+}
+
+function readSearchDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem(SEARCH_DRAFT_STORAGE_KEY) || "{}");
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSearchDraft(payload) {
+  try {
+    const drafts = readSearchDrafts();
+    drafts[payload.direction] = { ...payload, savedAt: new Date().toISOString() };
+    localStorage.setItem(SEARCH_DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+  } catch (error) {
+    // Private browsing can block local storage; search still works without draft recovery.
+  }
+}
+
+function restoreSearchDraft(direction) {
+  const draft = readSearchDrafts()[direction];
+  if (!draft) return false;
+  const strategy = ["precision", "balanced", "coverage"].includes(draft.collectionStrategy)
+    ? draft.collectionStrategy
+    : "precision";
+  const strategyInput = document.querySelector(`input[name="collectionStrategy"][value="${strategy}"]`);
+  if (strategyInput) strategyInput.checked = true;
+  applyCollectionStrategy(strategy);
+
+  const regionPresets = (draft.regions || []).filter((region) => REGION_LABELS[region]);
+  const customRegions = (draft.regions || []).filter((region) => !REGION_LABELS[region]);
+  setCheckedValues("regionPreset", regionPresets);
+  $("#regions").value = customRegions.join(", ");
+  setCheckedValues("sector", draft.sectors || []);
+  setCheckedValues("noticeType", draft.noticeTypes || []);
+  setCheckedValues("procurementSource", draft.procurementSources || []);
+  setCheckedValues("environmentalSource", draft.environmentalSources || []);
+  setCheckedValues("competitorSource", draft.competitorSources || []);
+  setCheckedValues("socialPlatform", draft.socialPlatforms || []);
+  $("#custom-keywords").value = draft.customKeywords || "";
+  $("#pages").value = String(draft.pages || 1);
+  $("#fast-mode").checked = Boolean(draft.fastMode);
+  $("#exclude-suppliers").checked = Boolean(draft.excludeSuppliers);
+  $("#strict-upstream").checked = Boolean(draft.strictUpstream);
+  $("#competitor-deep-scan").checked = Boolean(draft.competitorDeepScan);
+  $("#date-window").value = draft.dateWindow || $("#date-window").value;
+  if ($("#social-links")) $("#social-links").value = draft.socialLinks || "";
+  if ($("#social-positive-keywords")) $("#social-positive-keywords").value = draft.socialPositiveKeywords || "";
+  if ($("#social-negative-keywords")) $("#social-negative-keywords").value = draft.socialNegativeKeywords || "";
+  return true;
 }
 
 function sectorLibraryForDirection(direction) {
@@ -1326,7 +1492,7 @@ function setDirection(direction) {
         ? "选择监控主题、公告类型和时间范围后采集真实采购单位。"
         : "当前为下游买家采集模式。",
   );
-  applyCollectionStrategy();
+  restoreSearchDraft(state.direction) || applyCollectionStrategy();
   replayMotion($(".controls"), "direction-refresh");
 }
 
@@ -1359,6 +1525,7 @@ async function runSearch(mode = "amap") {
     setNotice("企业地图采集尚未配置。请添加 AMAP_KEY、BAIDU_MAP_AK 或 TIANDITU_TK。", true);
     return;
   }
+  saveSearchDraft(payload);
   button.disabled = true;
   button.textContent = "正在采集...";
   const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
@@ -1477,6 +1644,7 @@ function updateProgress(job) {
 }
 
 async function pollSearchJob(jobId) {
+  const startedAt = Date.now();
   while (state.activeJobId === jobId) {
     const response = await fetch(`/api/search/status?id=${encodeURIComponent(jobId)}`);
     if (response.status === 401) {
@@ -1493,7 +1661,9 @@ async function pollSearchJob(jobId) {
     if (job.status === "failed") {
       throw new Error(job.error || "采集失败");
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    const elapsed = Date.now() - startedAt;
+    const delay = elapsed > 60000 ? 2500 : elapsed > 20000 ? 1500 : 800;
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
   throw new Error("采集任务已停止");
 }
@@ -1501,6 +1671,7 @@ async function pollSearchJob(jobId) {
 function applySearchResult(data) {
   state.leads = data.leads || [];
   state.meta = data.meta || {};
+  if (data.persistence?.total) state.leadStoreLoadedAt = 0;
   renderLeads();
   $("#export-button").disabled = !state.leads.length;
   const warnings = data.errors?.length ? ` ${data.errors[0]}` : "";
@@ -1810,7 +1981,7 @@ async function saveSalesRecord(event) {
     });
     await closeDialogSmooth($("#company-dialog"));
     await Promise.all([
-      state.view === "profiles" ? loadProfiles() : loadSavedLeads(),
+      state.view === "profiles" ? loadProfiles(true) : loadSavedLeads(true),
       loadDashboard(),
     ]);
     setNotice("跟进记录已保存。");
@@ -1857,20 +2028,44 @@ async function saveMonitor(event) {
   }
 }
 
+async function waitForMonitorCompletion(id) {
+  if (state.runningMonitorPolls.has(id)) return;
+  state.runningMonitorPolls.add(id);
+  const deadline = Date.now() + 180000;
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await loadAlerts();
+      const monitor = state.monitors.find((item) => Number(item.id) === id);
+      if (!monitor?.running) {
+        state.leadStoreLoadedAt = 0;
+        await loadDashboard();
+        return;
+      }
+    }
+    setNotice("监控仍在后台运行，可稍后在本页查看结果。");
+  } finally {
+    state.runningMonitorPolls.delete(id);
+  }
+}
+
 async function monitorAction(event) {
   const runButton = event.target.closest("[data-monitor-run]");
   const toggleButton = event.target.closest("[data-monitor-toggle]");
   const deleteButton = event.target.closest("[data-monitor-delete]");
   if (!runButton && !toggleButton && !deleteButton) return;
   if (runButton) {
+    const monitorId = Number(runButton.dataset.monitorRun);
     await fetchJson("/api/monitors/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: Number(runButton.dataset.monitorRun) }),
+      body: JSON.stringify({ id: monitorId }),
     });
-    runButton.textContent = "运行中";
+    runButton.textContent = "执行中";
     runButton.disabled = true;
-    setTimeout(() => loadAlerts().then(loadDashboard), 2500);
+    await loadAlerts();
+    waitForMonitorCompletion(monitorId)
+      .catch((error) => setNotice(error.message || "监控状态更新失败", true));
   } else if (toggleButton) {
     await fetchJson("/api/monitors/toggle", {
       method: "POST",
@@ -1926,7 +2121,7 @@ function updateBulkToolbar() {
   const count = state.selectedLeadIds.size;
   $("#selected-count").textContent = count;
   $("#bulk-toolbar").hidden = state.view !== "database" || !count;
-  const visibleIds = state.filtered.map((lead) => Number(lead.id)).filter(Boolean);
+  const visibleIds = state.pageItems.map((lead) => Number(lead.id)).filter(Boolean);
   $("#select-all-leads").checked = Boolean(
     visibleIds.length && visibleIds.every((id) => state.selectedLeadIds.has(id)),
   );
@@ -1951,7 +2146,7 @@ async function applyBulkUpdate() {
   $("#bulk-status").value = "";
   $("#bulk-owner").value = "";
   $("#bulk-follow-up").value = "";
-  await Promise.all([loadSavedLeads(), loadDashboard()]);
+  await Promise.all([loadSavedLeads(true), loadDashboard()]);
   setNotice(`已批量更新 ${result.updated || 0} 条线索。`);
 }
 
@@ -2023,6 +2218,12 @@ async function logout() {
   window.location.href = "/login?v=pnvs-login-1";
 }
 
+function scheduleFilterRender() {
+  resetCurrentPage();
+  window.clearTimeout(filterRenderTimer);
+  filterRenderTimer = window.setTimeout(renderCurrentResults, 120);
+}
+
 function bindEvents() {
   $("#lead-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2033,11 +2234,30 @@ function bindEvents() {
   $("#save-monitor-button").addEventListener("click", openMonitorDialog);
   $("#export-button").addEventListener("click", exportCsv);
   $("#logout-button").addEventListener("click", logout);
-  $("#filter").addEventListener("input", renderCurrentResults);
-  $("#only-phone").addEventListener("change", renderCurrentResults);
-  $("#quality-filter").addEventListener("change", renderCurrentResults);
-  $("#status-filter").addEventListener("change", renderCurrentResults);
-  $("#direction-filter").addEventListener("change", renderCurrentResults);
+  $("#filter").addEventListener("input", scheduleFilterRender);
+  $("#only-phone").addEventListener("change", scheduleFilterRender);
+  $("#quality-filter").addEventListener("change", scheduleFilterRender);
+  $("#status-filter").addEventListener("change", scheduleFilterRender);
+  $("#direction-filter").addEventListener("change", scheduleFilterRender);
+  $("#work-queue-filter").addEventListener("change", scheduleFilterRender);
+  $("#page-size").addEventListener("change", (event) => {
+    state.pageSize = Number(event.target.value) || 50;
+    state.pages.database = 1;
+    state.pages.profiles = 1;
+    renderCurrentResults();
+  });
+  $("#page-prev").addEventListener("click", () => {
+    const key = currentPageKey();
+    state.pages[key] = Math.max(1, state.pages[key] - 1);
+    renderCurrentResults();
+    $("#pagination").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+  $("#page-next").addEventListener("click", () => {
+    const key = currentPageKey();
+    state.pages[key] += 1;
+    renderCurrentResults();
+    $("#pagination").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
   $$(".workspace-tabs button").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
@@ -2104,6 +2324,13 @@ function bindEvents() {
     if (!button) return;
     showCompanyDetail(state.profileFiltered[Number(button.dataset.profileDetailIndex)]);
   });
+  $("#profile-status-board").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-profile-status]");
+    if (!button) return;
+    $("#status-filter").value = button.dataset.profileStatus;
+    $("#work-queue-filter").value = "";
+    scheduleFilterRender();
+  });
   $("#monitor-close").addEventListener("click", () => closeDialogSmooth($("#monitor-dialog")));
   $("#monitor-dialog").addEventListener("click", (event) => {
     if (event.target === $("#monitor-dialog")) closeDialogSmooth($("#monitor-dialog"));
@@ -2130,7 +2357,7 @@ function bindEvents() {
   });
   $("#read-all-button").addEventListener("click", () => markNotificationsRead());
   $("#select-all-leads").addEventListener("change", (event) => {
-    state.filtered.forEach((lead) => {
+    state.pageItems.forEach((lead) => {
       if (!lead.id) return;
       if (event.target.checked) state.selectedLeadIds.add(Number(lead.id));
       else state.selectedLeadIds.delete(Number(lead.id));
@@ -2157,6 +2384,7 @@ function bindEvents() {
     $$("#quick-filters button").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     $("#filter").value = button.dataset.filter || "";
+    resetCurrentPage();
     renderLeads();
   });
 }

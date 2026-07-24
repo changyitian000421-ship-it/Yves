@@ -119,7 +119,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v10.2.1-timeout-hardened"
+APP_VERSION = "liquid-calcium-ops-v10.3-efficiency"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1942,25 +1942,26 @@ def save_leads(
                     ),
                 )
                 created += 1
-                saved_row = connection.execute(
-                    "SELECT id FROM leads WHERE dedupe_key = ?",
-                    (key,),
-                ).fetchone()
-                saved_lead_id = int(saved_row["id"]) if saved_row else None
-                connection.execute(
-                    """
-                    INSERT INTO notifications (
-                        type, title, message, lead_id, monitor_id, created_at
-                    ) VALUES ('new_lead', ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "发现新线索",
-                        f"{merged.get('company', '新企业')}，智能评分 {score} 分",
-                        saved_lead_id,
-                        valid_monitor_id,
-                        timestamp,
-                    ),
-                )
+                if valid_monitor_id is not None:
+                    saved_row = connection.execute(
+                        "SELECT id FROM leads WHERE dedupe_key = ?",
+                        (key,),
+                    ).fetchone()
+                    saved_lead_id = int(saved_row["id"]) if saved_row else None
+                    connection.execute(
+                        """
+                        INSERT INTO notifications (
+                            type, title, message, lead_id, monitor_id, created_at
+                        ) VALUES ('new_lead', ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "监控发现新线索",
+                            f"{merged.get('company', '新企业')}，智能评分 {score} 分",
+                            saved_lead_id,
+                            valid_monitor_id,
+                            timestamp,
+                        ),
+                    )
     return {
         "created": created,
         "updated": updated,
@@ -2171,7 +2172,11 @@ def dashboard_summary() -> dict[str, Any]:
             (today,),
         ).fetchone()[0]
         unread = connection.execute(
-            "SELECT COUNT(*) FROM notifications WHERE is_read = 0"
+            """
+            SELECT COUNT(*) FROM notifications
+            WHERE is_read = 0
+              AND (type = 'follow_up' OR monitor_id IS NOT NULL)
+            """
         ).fetchone()[0]
         unresolved_events = connection.execute(
             """
@@ -6280,6 +6285,9 @@ def collect_environmental_permits(
     custom_keywords: list[str],
     pages: int,
     progress_callback: Any = None,
+    keyword_limit: int = 12,
+    detail_limit: int = 40,
+    detail_workers: int = 2,
 ) -> tuple[list[Lead], list[str], int]:
     selected_regions = [region for region in regions if permit_region_code(region)]
     if not selected_regions:
@@ -6292,7 +6300,9 @@ def collect_environmental_permits(
             keyword_items.append((keyword, sector_id))
     fallback_sector_id = next(iter(sectors))
     keyword_items.extend((keyword, fallback_sector_id) for keyword in custom_keywords)
-    keyword_items = list(dict.fromkeys(keyword_items))[:12]
+    keyword_items = list(dict.fromkeys(keyword_items))[
+        : max(1, min(int(keyword_limit), 12))
+    ]
     jobs = [
         (region, keyword, sector_id, page_number)
         for region in selected_regions
@@ -6376,7 +6386,26 @@ def collect_environmental_permits(
                     f"正在查询排污许可：{region} / {keyword}",
                 )
 
-    selected_records = list(records.values())[:40]
+    def record_priority(item: tuple[dict[str, str], str, str]) -> tuple[int, int]:
+        record, keyword, sector_id = item
+        sector = sectors.get(sector_id) or {}
+        text = f"{record['company']} {record['industry']} {keyword}"
+        indicators = list(
+            dict.fromkeys(
+                [
+                    *sector.get("strict_indicators", []),
+                    *sector.get("indicators", []),
+                ]
+            )
+        )
+        hit_count = len([indicator for indicator in indicators if indicator in text])
+        return (1 if record["management"] == "重点管理" else 0, hit_count)
+
+    selected_records = sorted(
+        records.values(),
+        key=record_priority,
+        reverse=True,
+    )[: max(1, min(int(detail_limit), 40))]
     if not selected_records:
         indexed_leads = indexed_fluoride_permit_leads(selected_regions, sectors)
         if indexed_leads:
@@ -6390,7 +6419,7 @@ def collect_environmental_permits(
     def build_lead(item: tuple[dict[str, str], str, str]) -> Lead:
         record, keyword, fallback_id = item
         try:
-            detail_page = fetch_html(record["url"], timeout=20)
+            detail_page = fetch_html(record["url"], timeout=10)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"{record['company']}许可详情无法访问：{exc}") from exc
         if "错误页" in detail_page or "页面暂时无法访问" in detail_page:
@@ -6443,7 +6472,7 @@ def collect_environmental_permits(
             confidence="官方许可/废水含氟",
         )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, min(int(detail_workers), 4))) as executor:
         futures = {executor.submit(build_lead, item): item for item in selected_records}
         for index, future in enumerate(as_completed(futures), start=1):
             try:
@@ -7397,18 +7426,27 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "ccgp_pages": 1,
             "zycg_pages": 4,
             "website_candidates": 10,
+            "permit_keywords": 4,
+            "permit_details": 12,
+            "permit_workers": 4,
         },
         "balanced": {
             "keyword": 10,
             "ccgp_pages": 2,
             "zycg_pages": 8,
             "website_candidates": 16,
+            "permit_keywords": 8,
+            "permit_details": 24,
+            "permit_workers": 4,
         },
         "coverage": {
             "keyword": 16,
             "ccgp_pages": 4,
             "zycg_pages": 14,
             "website_candidates": 24,
+            "permit_keywords": 12,
+            "permit_details": 40,
+            "permit_workers": 4,
         },
     }.get(
         collection_strategy,
@@ -7417,6 +7455,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "ccgp_pages": 2,
             "zycg_pages": 8,
             "website_candidates": 16,
+            "permit_keywords": 8,
+            "permit_details": 24,
+            "permit_workers": 4,
         },
     )
     used_fallback = False
@@ -7536,6 +7577,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 custom_keywords,
                 pages,
                 progress_callback,
+                strategy_limits["permit_keywords"],
+                strategy_limits["permit_details"],
+                strategy_limits["permit_workers"],
             )
             leads.extend(permit_leads)
             errors.extend(permit_errors)
@@ -8126,6 +8170,8 @@ def list_monitors() -> list[dict[str, Any]]:
         rows = connection.execute(
             "SELECT * FROM monitors ORDER BY enabled DESC, created_at DESC"
         ).fetchall()
+    with MONITOR_RUNNING_LOCK:
+        running_ids = set(MONITOR_RUNNING)
     monitors: list[dict[str, Any]] = []
     for row in rows:
         payload = json.loads(row["payload"] or "{}")
@@ -8135,6 +8181,7 @@ def list_monitors() -> list[dict[str, Any]]:
             "id": row["id"],
             "name": row["name"],
             "enabled": bool(row["enabled"]),
+            "running": row["id"] in running_ids,
             "intervalHours": row["interval_hours"],
             "payload": payload,
             "direction": summary["direction"],
@@ -8650,6 +8697,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 rows = connection.execute(
                     """
                     SELECT * FROM notifications
+                    WHERE type = 'follow_up' OR monitor_id IS NOT NULL
                     ORDER BY is_read ASC, created_at DESC
                     LIMIT 100
                     """

@@ -1106,8 +1106,20 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(monitor["directionLabel"], "含氟废水企业")
         self.assertEqual(monitor["sectorCount"], 2)
         self.assertIn("来源：2 个", monitor["summary"])
+        self.assertFalse(monitor["running"])
 
-    def test_new_lead_notification_can_open_saved_detail(self):
+        app.MONITOR_RUNNING.add(monitor_id)
+        running_monitor = next(
+            item for item in app.list_monitors() if item["id"] == monitor_id
+        )
+        self.assertTrue(running_monitor["running"])
+
+    def test_monitor_new_lead_notification_can_open_saved_detail(self):
+        monitor_id = app.save_monitor(
+            "测试监控",
+            {"direction": "downstream", "regions": ["east"], "sectors": ["water"]},
+            24,
+        )
         result = app.save_leads(
             [
                 {
@@ -1117,7 +1129,8 @@ class LiquidCalciumAppTests(unittest.TestCase):
                     "sector": "水处理",
                     "phone": "0531-12345678",
                 }
-            ]
+            ],
+            monitor_id=monitor_id,
         )
 
         self.assertEqual(result["created"], 1)
@@ -1130,6 +1143,7 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertIsNotNone(lead)
         self.assertEqual(lead["company"], "测试新线索有限公司")
         self.assertEqual(lead["phone"], "0531-12345678")
+        self.assertEqual(notification["monitor_id"], monitor_id)
 
     def test_save_leads_discards_invalid_monitor_foreign_key(self):
         result = app.save_leads(
@@ -1156,10 +1170,9 @@ class LiquidCalciumAppTests(unittest.TestCase):
             ).fetchone()
 
         self.assertIsNone(lead["monitor_id"])
-        self.assertEqual(notification["lead_id"], lead["id"])
-        self.assertIsNone(notification["monitor_id"])
+        self.assertIsNone(notification)
 
-    def test_bulk_save_notifications_reference_existing_leads(self):
+    def test_manual_bulk_save_does_not_create_notification_noise(self):
         leads = [
             {
                 "company": f"批量保存测试企业{i}有限公司",
@@ -1174,6 +1187,9 @@ class LiquidCalciumAppTests(unittest.TestCase):
 
         self.assertEqual(result["created"], 120)
         with app.database_connection() as connection:
+            notification_count = connection.execute(
+                "SELECT COUNT(*) FROM notifications"
+            ).fetchone()[0]
             orphan_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM notifications AS notification
@@ -1181,7 +1197,35 @@ class LiquidCalciumAppTests(unittest.TestCase):
                 WHERE notification.lead_id IS NOT NULL AND lead.id IS NULL
                 """
             ).fetchone()[0]
+        self.assertEqual(notification_count, 0)
         self.assertEqual(orphan_count, 0)
+
+    def test_dashboard_ignores_legacy_manual_new_lead_notifications(self):
+        app.save_leads(
+            [
+                {
+                    "company": "历史手动提醒测试有限公司",
+                    "direction": "downstream",
+                    "region": "山东",
+                    "sector": "水处理",
+                }
+            ]
+        )
+        with app.DATABASE_LOCK, app.database_connection() as connection:
+            lead_id = connection.execute(
+                "SELECT id FROM leads WHERE company = ?",
+                ("历史手动提醒测试有限公司",),
+            ).fetchone()["id"]
+            connection.execute(
+                """
+                INSERT INTO notifications (
+                    type, title, message, lead_id, is_read, created_at
+                ) VALUES ('new_lead', '历史提醒', '手动采集旧提醒', ?, 0, ?)
+                """,
+                (lead_id, app.now_iso()),
+            )
+
+        self.assertEqual(app.dashboard_summary()["unreadNotifications"], 0)
 
     def test_manual_profile_create_is_deduplicated_and_keeps_sales_fields(self):
         first = app.create_manual_lead(
@@ -1292,6 +1336,23 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(result["meta"]["mode"], "environmental")
         self.assertGreaterEqual(len(result["leads"]), 1)
         self.assertIn("已核验官方许可索引", result["errors"][0])
+
+    @patch("app.collect_environmental_permits")
+    def test_environmental_precision_limits_slow_permit_details(self, collect_permits):
+        collect_permits.return_value = ([], [], 0)
+
+        app.collect_leads(
+            {
+                "direction": "environmental",
+                "regions": ["江西"],
+                "sectors": ["fluorochemicals"],
+                "environmentalSources": ["permit"],
+                "collectionStrategy": "precision",
+                "pages": 1,
+            }
+        )
+
+        self.assertEqual(collect_permits.call_args.args[-3:], (4, 12, 4))
 
     @patch("app.fetch_html")
     def test_competitor_intelligence_builds_reverse_profile(self, fetch_html):

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=macos-ui-1" />
+    <link rel="stylesheet" href="/styles.css?v=efficiency-1" />
   </head>
   <body>
     <div class="app">
@@ -15,6 +15,7 @@
             <h1>氯化钙产业线索采集器</h1>
             <p>买家 · 液钙货源 · 招采 · 竞品情报</p>
           </div>
+          <button id="mobile-results-button" class="mobile-results-button" type="button">查看结果</button>
         </div>
 
         <form id="lead-form" class="controls">
@@ -377,6 +378,17 @@
                 <option value="social">社媒线索</option>
               </select>
             </label>
+            <label class="field compact work-queue-field">
+              <span>销售工作队列</span>
+              <select id="work-queue-filter">
+                <option value="">全部线索</option>
+                <option value="due">今日待跟进</option>
+                <option value="hot-new">高潜待联系</option>
+                <option value="unassigned">未分配负责人</option>
+                <option value="new">新发现待核实</option>
+                <option value="needs-contact">待补联系方式</option>
+              </select>
+            </label>
           </div>
         </section>
 
@@ -385,6 +397,23 @@
         </section>
 
         <section id="quality-summary" class="quality-summary" hidden aria-live="polite"></section>
+
+        <section id="pagination" class="pagination" hidden aria-label="结果分页">
+          <span id="pagination-summary">共 0 条</span>
+          <div class="pagination-actions">
+            <label>
+              <span>每页</span>
+              <select id="page-size">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <button id="page-prev" class="icon-button" type="button" aria-label="上一页" title="上一页">‹</button>
+            <strong id="page-current">1 / 1</strong>
+            <button id="page-next" class="icon-button" type="button" aria-label="下一页" title="下一页">›</button>
+          </div>
+        </section>
 
         <section id="bulk-toolbar" class="bulk-toolbar" hidden>
           <strong>已选 <span id="selected-count">0</span> 条</strong>
@@ -778,6 +807,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=macos-ui-1"></script>
+    <script src="/app.js?v=efficiency-1"></script>
   </body>
 </html>
