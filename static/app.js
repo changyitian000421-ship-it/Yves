@@ -17,6 +17,7 @@ const state = {
   profiles: [],
   profileFiltered: [],
   dashboard: {},
+  apiUsage: [],
   monitors: [],
   notifications: [],
   currentLead: null,
@@ -774,6 +775,8 @@ async function fetchJson(url, options = {}) {
 
 async function loadDashboard() {
   state.dashboard = await fetchJson("/api/dashboard");
+  state.apiUsage = state.dashboard.apiUsage || [];
+  renderApiUsage(state.apiUsage);
   $("#database-count").textContent = state.dashboard.total || 0;
   $("#profile-count").textContent = state.dashboard.total || 0;
   $("#alert-count").textContent = state.dashboard.unreadNotifications || 0;
@@ -781,6 +784,78 @@ async function loadDashboard() {
   if (state.view === "database") renderMetrics(state.filtered);
   else if (state.view === "profiles") renderMetrics(state.profileFiltered);
   else if (state.view !== "collect") renderMetrics([]);
+}
+
+function renderApiUsage(items) {
+  const panel = $("#api-usage-panel");
+  const configured = items.filter((item) => item.configured);
+  const urgent = configured.filter((item) => ["critical", "exhausted"].includes(item.status));
+  const attention = configured.filter((item) => ["warning", "setup"].includes(item.status));
+  panel.classList.toggle("is-critical", urgent.length > 0);
+  panel.classList.toggle("is-warning", !urgent.length && attention.length > 0);
+
+  let headline = `本系统今日：${configured.length} 个平台已接入，用量正常`;
+  if (!configured.length) headline = "尚未接入平台 API";
+  else if (urgent.length) headline = `本系统今日：${urgent.length} 个平台额度即将或已经用完`;
+  else if (attention.length) headline = `本系统今日：${attention.length} 个平台需要关注额度`;
+  $("#api-usage-headline").textContent = headline;
+
+  $("#api-usage-grid").innerHTML = items.map((item) => {
+    const total = item.limit > 0 ? item.limit.toLocaleString("zh-CN") : "待设置";
+    const remaining = item.remaining === null
+      ? "设置总量后显示余量"
+      : `剩余 ${Number(item.remaining).toLocaleString("zh-CN")} 次`;
+    return `
+      <article class="api-usage-item status-${escapeHtml(item.status)}">
+        <div class="api-usage-item-head">
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <span>${escapeHtml(item.category)}</span>
+          </div>
+          <em>${escapeHtml(item.statusLabel)}</em>
+        </div>
+        <div class="api-usage-numbers">
+          <b>${Number(item.used || 0).toLocaleString("zh-CN")}</b>
+          <span>/ ${total}</span>
+        </div>
+        <div class="api-usage-track" role="progressbar" aria-label="${escapeHtml(item.label)}今日用量" aria-valuenow="${Number(item.percent || 0)}" aria-valuemin="0" aria-valuemax="100">
+          <i style="width:${Math.max(0, Math.min(100, Number(item.percent || 0)))}%"></i>
+        </div>
+        <small>${escapeHtml(remaining)}</small>
+      </article>
+    `;
+  }).join("");
+}
+
+function openApiQuotaDialog() {
+  $("#api-quota-fields").innerHTML = state.apiUsage.map((item) => `
+    <label class="field api-quota-field">
+      <span>${escapeHtml(item.label)}每日总量</span>
+      <input type="number" min="0" max="100000000" step="1"
+        data-api-provider="${escapeHtml(item.provider)}"
+        value="${Number(item.limit || 0)}" />
+      <small>今日已用 ${Number(item.used || 0).toLocaleString("zh-CN")} 次</small>
+    </label>
+  `).join("");
+  showDialogSmooth($("#api-quota-dialog"));
+}
+
+async function saveApiQuota(event) {
+  event.preventDefault();
+  const limits = {};
+  $$("#api-quota-fields [data-api-provider]").forEach((input) => {
+    limits[input.dataset.apiProvider] = Number(input.value || 0);
+  });
+  const result = await fetchJson("/api/usage/limits", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limits }),
+  });
+  state.apiUsage = result.apiUsage || [];
+  state.dashboard.apiUsage = state.apiUsage;
+  renderApiUsage(state.apiUsage);
+  await closeDialogSmooth($("#api-quota-dialog"));
+  setNotice("API 每日额度已保存。");
 }
 
 async function loadLeadStore(force = false) {
@@ -2234,6 +2309,14 @@ function bindEvents() {
   $("#save-monitor-button").addEventListener("click", openMonitorDialog);
   $("#export-button").addEventListener("click", exportCsv);
   $("#logout-button").addEventListener("click", logout);
+  $("#api-quota-button").addEventListener("click", openApiQuotaDialog);
+  $("#api-quota-close").addEventListener("click", () => closeDialogSmooth($("#api-quota-dialog")));
+  $("#api-quota-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#api-quota-dialog")) closeDialogSmooth($("#api-quota-dialog"));
+  });
+  $("#api-quota-form").addEventListener("submit", (event) => {
+    saveApiQuota(event).catch((error) => setNotice(error.message || "额度保存失败", true));
+  });
   $("#filter").addEventListener("input", scheduleFilterRender);
   $("#only-phone").addEventListener("change", scheduleFilterRender);
   $("#quality-filter").addEventListener("change", scheduleFilterRender);

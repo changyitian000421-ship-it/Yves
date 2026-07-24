@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=efficiency-1" />
+    <link rel="stylesheet" href="/styles.css?v=api-quota-1" />
   </head>
   <body>
     <div class="app">
@@ -311,6 +311,17 @@
             <span id="system-count" class="tab-count">0</span>
           </button>
         </nav>
+
+        <section id="api-usage-panel" class="api-usage-panel" aria-live="polite">
+          <div class="api-usage-head">
+            <div>
+              <span class="api-usage-kicker">API 用量中心</span>
+              <strong id="api-usage-headline">正在读取今日用量...</strong>
+            </div>
+            <button id="api-quota-button" class="secondary api-quota-button" type="button">设置每日总量</button>
+          </div>
+          <div id="api-usage-grid" class="api-usage-grid"></div>
+        </section>
 
         <section class="metrics" aria-label="统计">
           <div>
@@ -807,6 +818,21 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=efficiency-1"></script>
+    <dialog id="api-quota-dialog" class="company-dialog api-quota-dialog">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">API quota</div>
+          <h3>设置每日总量</h3>
+        </div>
+        <button id="api-quota-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="api-quota-help">填写各平台控制台显示的每日总额度。填 0 可恢复系统默认值或标记为待设置。</p>
+      <form id="api-quota-form" class="api-quota-form">
+        <div id="api-quota-fields" class="api-quota-fields"></div>
+        <button class="primary" type="submit">保存额度</button>
+      </form>
+    </dialog>
+
+    <script src="/app.js?v=api-quota-1"></script>
   </body>
 </html>

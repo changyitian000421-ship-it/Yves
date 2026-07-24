@@ -23,10 +23,14 @@ class LiquidCalciumAppTests(unittest.TestCase):
         app.DATABASE_PATH = app.DATA_DIR / "leads.db"
         app.TURSO_REPLICA_PATH = app.DATA_DIR / "turso-replica.db"
         app.BACKUP_DIR = app.DATA_DIR / "backups"
+        with app.API_USAGE_BUFFER_LOCK:
+            app.API_USAGE_BUFFER.clear()
         app.initialize_database()
 
     def tearDown(self):
         app.MONITOR_RUNNING.clear()
+        with app.API_USAGE_BUFFER_LOCK:
+            app.API_USAGE_BUFFER.clear()
         (
             app.DATA_DIR,
             app.DATABASE_PATH,
@@ -166,6 +170,56 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertNotIn("private-baidu-key", str(status))
         self.assertNotIn("private-tianditu-key", str(status))
         self.assertNotIn("private-search-key", str(status))
+
+    def test_api_usage_quota_warns_and_enforces_qianfan_limit(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AMAP_KEY": "private-amap-key",
+                "BAIDU_SEARCH_API_KEY": "private-search-key",
+            },
+            clear=False,
+        ):
+            app.set_api_quota_limits({"amap": 10, "baidu_qianfan": 2})
+            app.record_api_request("amap", 7)
+            overview = {
+                item["provider"]: item
+                for item in app.api_usage_overview()
+            }
+            self.assertEqual(overview["amap"]["used"], 7)
+            self.assertEqual(overview["amap"]["remaining"], 3)
+            self.assertEqual(overview["amap"]["status"], "warning")
+
+            app.reserve_qianfan_search_request()
+            app.reserve_qianfan_search_request()
+            with self.assertRaisesRegex(RuntimeError, "每日保护上限 2 次"):
+                app.reserve_qianfan_search_request()
+
+    def test_api_usage_dashboard_lists_current_and_future_platforms(self):
+        app.record_api_request("baidu_map", 3)
+        usage = {
+            item["provider"]: item
+            for item in app.dashboard_summary()["apiUsage"]
+        }
+
+        self.assertEqual(usage["baidu_map"]["used"], 3)
+        self.assertIn("baidu_qianfan", usage)
+        self.assertIn("amap", usage)
+        self.assertIn("tianditu", usage)
+        self.assertIn("aliyun_sms", usage)
+
+        app.flush_api_usage_buffer()
+        with app.API_USAGE_BUFFER_LOCK:
+            self.assertEqual(app.API_USAGE_BUFFER, {})
+        persisted = {
+            item["provider"]: item
+            for item in app.api_usage_overview()
+        }
+        self.assertEqual(persisted["baidu_map"]["used"], 3)
+
+    def test_api_quota_rejects_unknown_platform(self):
+        with self.assertRaisesRegex(ValueError, "未知 API 平台"):
+            app.set_api_quota_limits({"unknown_service": 100})
 
     @patch("app.urlopen")
     def test_qianfan_web_search_uses_bearer_auth_and_maps_references(self, urlopen):

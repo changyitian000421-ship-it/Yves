@@ -41,6 +41,7 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import certifi
 
@@ -105,6 +106,36 @@ BAIDU_SEARCH_DAILY_LIMIT = max(
     1,
     min(int(os.getenv("BAIDU_SEARCH_DAILY_LIMIT", "45")), 500),
 )
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+API_PROVIDERS = {
+    "baidu_qianfan": {
+        "label": "百度千帆",
+        "category": "公开搜索",
+        "defaultLimit": BAIDU_SEARCH_DAILY_LIMIT,
+    },
+    "amap": {
+        "label": "高德地图",
+        "category": "企业地点",
+        "defaultLimit": max(0, int(os.getenv("AMAP_DAILY_LIMIT", "0"))),
+    },
+    "baidu_map": {
+        "label": "百度地图",
+        "category": "企业地点",
+        "defaultLimit": max(0, int(os.getenv("BAIDU_MAP_DAILY_LIMIT", "0"))),
+    },
+    "tianditu": {
+        "label": "天地图",
+        "category": "企业地点",
+        "defaultLimit": max(0, int(os.getenv("TIANDITU_DAILY_LIMIT", "0"))),
+    },
+    "aliyun_sms": {
+        "label": "阿里云短信",
+        "category": "登录验证",
+        "defaultLimit": max(0, int(os.getenv("ALIYUN_SMS_DAILY_LIMIT", "0"))),
+    },
+}
+API_USAGE_BUFFER: dict[str, int] = {}
+API_USAGE_BUFFER_LOCK = threading.Lock()
 SEARCH_JOBS: dict[str, dict[str, Any]] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
 SEARCH_JOB_TTL = 60 * 60
@@ -119,7 +150,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v10.3-efficiency"
+APP_VERSION = "liquid-calcium-ops-v10.4-api-quota"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1217,6 +1248,28 @@ def initialize_database() -> None:
                 request_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (provider, usage_date)
             );
+
+            CREATE TABLE IF NOT EXISTS api_usage (
+                provider TEXT NOT NULL,
+                usage_date TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, usage_date)
+            );
+
+            CREATE TABLE IF NOT EXISTS api_quota_limits (
+                provider TEXT PRIMARY KEY,
+                daily_limit INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO api_usage
+                (provider, usage_date, request_count, updated_at)
+            SELECT provider, usage_date, request_count, usage_date || 'T00:00:00'
+            FROM web_search_usage
             """
         )
         existing_columns = {
@@ -2157,7 +2210,7 @@ def confirm_social_entity(lead_id: int, company: str) -> dict[str, Any]:
 
 
 def dashboard_summary() -> dict[str, Any]:
-    today = date.today().isoformat()
+    today = datetime.now(CHINA_TZ).date().isoformat()
     with DATABASE_LOCK, database_connection() as connection:
         total = connection.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
         high_score = connection.execute(
@@ -2193,6 +2246,7 @@ def dashboard_summary() -> dict[str, Any]:
         supplier_count = connection.execute(
             "SELECT COUNT(*) FROM leads WHERE opportunity_role = 'supplier'"
         ).fetchone()[0]
+        api_usage = api_usage_overview(connection)
     return {
         "total": total,
         "highScore": high_score,
@@ -2202,6 +2256,7 @@ def dashboard_summary() -> dict[str, Any]:
         "buyerCount": buyer_count,
         "supplierCount": supplier_count,
         "statuses": {row["sales_status"]: row["count"] for row in status_rows},
+        "apiUsage": api_usage,
     }
 
 
@@ -2235,6 +2290,11 @@ def system_overview() -> dict[str, Any]:
         ).fetchall()
         active_database_path = TURSO_REPLICA_PATH if turso_active() else DATABASE_PATH
         database_size = active_database_path.stat().st_size if active_database_path.exists() else 0
+        api_usage = api_usage_overview(connection)
+    qianfan_usage = next(
+        (item for item in api_usage if item["provider"] == "baidu_qianfan"),
+        {"used": 0, "limit": BAIDU_SEARCH_DAILY_LIMIT},
+    )
     return {
         "version": APP_VERSION,
         "databaseSize": database_size,
@@ -2246,9 +2306,10 @@ def system_overview() -> dict[str, Any]:
         "baiduMapConfigured": bool(os.getenv("BAIDU_MAP_AK")),
         "tiandituConfigured": bool(os.getenv("TIANDITU_TK")),
         "baiduSearchConfigured": bool(baidu_search_api_key()),
-        "baiduSearchUsageToday": qianfan_search_usage_today(),
-        "baiduSearchDailyLimit": BAIDU_SEARCH_DAILY_LIMIT,
+        "baiduSearchUsageToday": qianfan_usage["used"],
+        "baiduSearchDailyLimit": qianfan_usage["limit"],
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
+        "apiUsage": api_usage,
         "events": [
             {
                 "id": row["id"],
@@ -2431,7 +2492,11 @@ def send_aliyun_verify_code(phone: str) -> None:
     }
     if ALIYUN_PNVS_SCHEME_NAME:
         params["SchemeName"] = ALIYUN_PNVS_SCHEME_NAME
-    aliyun_pnvs_request("SendSmsVerifyCode", params)
+    record_api_request("aliyun_sms")
+    try:
+        aliyun_pnvs_request("SendSmsVerifyCode", params)
+    finally:
+        flush_api_usage_buffer()
 
 
 def check_aliyun_verify_code(phone: str, code: str) -> bool:
@@ -2662,6 +2727,7 @@ def amap_search(
     url = f"https://restapi.amap.com/v3/place/text?{query}"
     req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
     for attempt in range(5):
+        record_api_request("amap")
         with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         rate_limited = (
@@ -2716,6 +2782,7 @@ def baidu_map_search(
     req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
     data: dict[str, Any] = {}
     for attempt in range(5):
+        record_api_request("baidu_map")
         with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         status = int(data.get("status") or 0)
@@ -2794,6 +2861,7 @@ def tianditu_search(
     req = Request(url, headers={"User-Agent": "BuyerLeadFinder/1.0"})
     data: dict[str, Any] = {}
     for attempt in range(5):
+        record_api_request("tianditu")
         with urlopen(req, timeout=timeout, context=DEFAULT_SSL_CONTEXT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         code = tianditu_infocode(data)
@@ -2977,9 +3045,12 @@ def read_url_bytes(
     request: Request,
     timeout: int,
     attempts: int = 1,
+    retry_callback: Any | None = None,
 ) -> bytes:
     attempt_limit = max(1, min(int(attempts), 3))
     for attempt in range(attempt_limit):
+        if attempt > 0 and retry_callback:
+            retry_callback()
         try:
             with urlopen(
                 request,
@@ -5126,7 +5197,12 @@ def qianfan_web_search(
     )
     try:
         payload = json.loads(
-            read_url_bytes(request, timeout=20, attempts=2).decode("utf-8")
+            read_url_bytes(
+                request,
+                timeout=20,
+                attempts=2,
+                retry_callback=reserve_qianfan_search_request,
+            ).decode("utf-8")
         )
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -5249,39 +5325,136 @@ def store_web_search_cache(
         print(f"WARNING: web search cache write failed: {exc}", flush=True)
 
 
-def reserve_qianfan_search_request() -> None:
-    usage_date = date.today().isoformat()
+def api_usage_date() -> str:
+    return datetime.now(CHINA_TZ).date().isoformat()
+
+
+def api_provider_configured(provider: str) -> bool:
+    if provider == "baidu_qianfan":
+        return bool(baidu_search_api_key())
+    if provider == "amap":
+        return bool(os.getenv("AMAP_KEY"))
+    if provider == "baidu_map":
+        return bool(os.getenv("BAIDU_MAP_AK"))
+    if provider == "tianditu":
+        return bool(os.getenv("TIANDITU_TK"))
+    if provider == "aliyun_sms":
+        return sms_configured() or SMS_DEV_MODE
+    return False
+
+
+def api_quota_limit(
+    provider: str,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    provider_info = API_PROVIDERS.get(provider, {})
+    default_limit = max(0, int(provider_info.get("defaultLimit") or 0))
+    try:
+        if connection is not None:
+            row = connection.execute(
+                "SELECT daily_limit FROM api_quota_limits WHERE provider = ?",
+                (provider,),
+            ).fetchone()
+        else:
+            with DATABASE_LOCK, database_connection() as own_connection:
+                row = own_connection.execute(
+                    "SELECT daily_limit FROM api_quota_limits WHERE provider = ?",
+                    (provider,),
+                ).fetchone()
+        return max(0, int(row["daily_limit"])) if row else default_limit
+    except Exception:  # noqa: BLE001 - quota UI must not interrupt collection.
+        return default_limit
+
+
+def reserve_api_request(
+    provider: str,
+    *,
+    enforce_limit: bool = False,
+    count: int = 1,
+) -> None:
+    if provider not in API_PROVIDERS:
+        raise ValueError(f"未知 API 平台：{provider}")
+    increment = max(1, int(count))
+    usage_date = api_usage_date()
     with DATABASE_LOCK, database_connection() as connection:
         row = connection.execute(
             """
             SELECT request_count
-            FROM web_search_usage
-            WHERE provider = 'baidu_qianfan' AND usage_date = ?
+            FROM api_usage
+            WHERE provider = ? AND usage_date = ?
             """,
-            (usage_date,),
+            (provider, usage_date),
         ).fetchone()
         request_count = int(row["request_count"]) if row else 0
-        if request_count >= BAIDU_SEARCH_DAILY_LIMIT:
+        daily_limit = api_quota_limit(provider, connection)
+        if enforce_limit and daily_limit > 0 and request_count + increment > daily_limit:
+            label = str(API_PROVIDERS[provider]["label"])
             raise RuntimeError(
-                f"百度千帆搜索已达到本地每日保护上限 "
-                f"{BAIDU_SEARCH_DAILY_LIMIT} 次"
+                f"{label}已达到本地每日保护上限 {daily_limit} 次"
             )
         connection.execute(
             """
-            INSERT OR IGNORE INTO web_search_usage
-                (provider, usage_date, request_count)
-            VALUES ('baidu_qianfan', ?, 0)
+            INSERT OR IGNORE INTO api_usage
+                (provider, usage_date, request_count, updated_at)
+            VALUES (?, ?, 0, ?)
             """,
-            (usage_date,),
+            (provider, usage_date, now_iso()),
         )
         connection.execute(
             """
-            UPDATE web_search_usage
-            SET request_count = request_count + 1
-            WHERE provider = 'baidu_qianfan' AND usage_date = ?
+            UPDATE api_usage
+            SET request_count = request_count + ?, updated_at = ?
+            WHERE provider = ? AND usage_date = ?
             """,
-            (usage_date,),
+            (increment, now_iso(), provider, usage_date),
         )
+
+
+def record_api_request(provider: str, count: int = 1) -> None:
+    if provider not in API_PROVIDERS:
+        return
+    with API_USAGE_BUFFER_LOCK:
+        API_USAGE_BUFFER[provider] = (
+            API_USAGE_BUFFER.get(provider, 0) + max(1, int(count))
+        )
+
+
+def flush_api_usage_buffer() -> None:
+    with API_USAGE_BUFFER_LOCK:
+        pending = dict(API_USAGE_BUFFER)
+        API_USAGE_BUFFER.clear()
+    if not pending:
+        return
+    try:
+        usage_date = api_usage_date()
+        timestamp = now_iso()
+        with DATABASE_LOCK, database_connection() as connection:
+            for provider, count in pending.items():
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO api_usage
+                        (provider, usage_date, request_count, updated_at)
+                    VALUES (?, ?, 0, ?)
+                    """,
+                    (provider, usage_date, timestamp),
+                )
+                connection.execute(
+                    """
+                    UPDATE api_usage
+                    SET request_count = request_count + ?, updated_at = ?
+                    WHERE provider = ? AND usage_date = ?
+                    """,
+                    (count, timestamp, provider, usage_date),
+                )
+    except Exception as exc:  # noqa: BLE001 - metering must never stop collection.
+        with API_USAGE_BUFFER_LOCK:
+            for provider, count in pending.items():
+                API_USAGE_BUFFER[provider] = API_USAGE_BUFFER.get(provider, 0) + count
+        print(f"WARNING: API usage flush failed: {exc}", flush=True)
+
+
+def reserve_qianfan_search_request() -> None:
+    reserve_api_request("baidu_qianfan", enforce_limit=True)
 
 
 def qianfan_search_usage_today() -> int:
@@ -5290,14 +5463,128 @@ def qianfan_search_usage_today() -> int:
             row = connection.execute(
                 """
                 SELECT request_count
-                FROM web_search_usage
+                FROM api_usage
                 WHERE provider = 'baidu_qianfan' AND usage_date = ?
                 """,
-                (date.today().isoformat(),),
+                (api_usage_date(),),
             ).fetchone()
         return int(row["request_count"]) if row else 0
     except Exception:  # noqa: BLE001 - health UI should remain available.
         return 0
+
+
+def api_usage_status(used: int, limit: int, configured: bool) -> tuple[str, str]:
+    if not configured:
+        return "inactive", "未配置"
+    if limit <= 0:
+        return "setup", "待设置总量"
+    percent = (used / limit) * 100
+    if percent >= 100:
+        return "exhausted", "额度已用完"
+    if percent >= 90:
+        return "critical", "即将用完"
+    if percent >= 70:
+        return "warning", "用量偏高"
+    return "normal", "充足"
+
+
+def api_usage_overview(
+    connection: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    usage: dict[str, int] = {}
+    limits: dict[str, int] = {}
+    try:
+        def read_usage(active_connection: Any) -> None:
+            nonlocal usage, limits
+            usage = {
+                str(row["provider"]): int(row["request_count"])
+                for row in active_connection.execute(
+                    "SELECT provider, request_count FROM api_usage WHERE usage_date = ?",
+                    (api_usage_date(),),
+                ).fetchall()
+            }
+            limits = {
+                str(row["provider"]): max(0, int(row["daily_limit"]))
+                for row in active_connection.execute(
+                    "SELECT provider, daily_limit FROM api_quota_limits"
+                ).fetchall()
+            }
+        if connection is not None:
+            read_usage(connection)
+        else:
+            with DATABASE_LOCK, database_connection() as own_connection:
+                read_usage(own_connection)
+    except Exception as exc:  # noqa: BLE001 - dashboard should remain available.
+        print(f"WARNING: API usage overview failed: {exc}", flush=True)
+    with API_USAGE_BUFFER_LOCK:
+        for provider, count in API_USAGE_BUFFER.items():
+            usage[provider] = usage.get(provider, 0) + count
+
+    overview: list[dict[str, Any]] = []
+    for provider, info in API_PROVIDERS.items():
+        used = usage.get(provider, 0)
+        limit = limits.get(provider, max(0, int(info.get("defaultLimit") or 0)))
+        configured = api_provider_configured(provider)
+        status, status_label = api_usage_status(used, limit, configured)
+        percent = min(100, round((used / limit) * 100, 1)) if limit > 0 else 0
+        overview.append(
+            {
+                "provider": provider,
+                "label": info["label"],
+                "category": info["category"],
+                "configured": configured,
+                "used": used,
+                "limit": limit,
+                "remaining": max(0, limit - used) if limit > 0 else None,
+                "percent": percent,
+                "status": status,
+                "statusLabel": status_label,
+                "periodLabel": "今日",
+            }
+        )
+    return overview
+
+
+def set_api_quota_limits(raw_limits: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_limits, dict):
+        raise ValueError("额度格式不正确")
+    normalized: dict[str, int] = {}
+    for provider, value in raw_limits.items():
+        if provider not in API_PROVIDERS:
+            raise ValueError(f"未知 API 平台：{provider}")
+        try:
+            daily_limit = int(value or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{API_PROVIDERS[provider]['label']}额度必须是整数") from exc
+        if daily_limit < 0 or daily_limit > 100_000_000:
+            raise ValueError(f"{API_PROVIDERS[provider]['label']}额度范围不正确")
+        normalized[provider] = daily_limit
+
+    with DATABASE_LOCK, database_connection() as connection:
+        for provider, daily_limit in normalized.items():
+            if daily_limit == 0:
+                connection.execute(
+                    "DELETE FROM api_quota_limits WHERE provider = ?",
+                    (provider,),
+                )
+                continue
+            connection.execute(
+                """
+                INSERT INTO api_quota_limits (provider, daily_limit, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    daily_limit = excluded.daily_limit,
+                    updated_at = excluded.updated_at
+                """,
+                (provider, daily_limit, now_iso()),
+            )
+    log_activity(
+        "update_api_quota",
+        "system",
+        "更新 API 每日额度",
+        details={"providers": sorted(normalized)},
+    )
+    return api_usage_overview()
 
 
 def parse_360_environmental_results(page: str) -> list[dict[str, str]]:
@@ -8134,6 +8421,8 @@ def run_search_job(job_id: str, payload: dict[str, Any]) -> None:
                         "error": str(exc),
                     }
                 )
+    finally:
+        flush_api_usage_buffer()
 
 
 def monitor_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8302,6 +8591,8 @@ def _run_monitor(monitor_id: int) -> dict[str, Any]:
                 (started, next_run, str(exc), now_iso(), monitor_id),
             )
         raise
+    finally:
+        flush_api_usage_buffer()
 
 
 def run_monitor(monitor_id: int) -> dict[str, Any]:
@@ -8915,6 +9206,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/api/search":
             result = collect_leads(payload)
             result["persistence"] = persist_search_result(result)
+            flush_api_usage_buffer()
             for error in result.get("errors") or []:
                 log_system_event(
                     collection_event_level(str(error), bool(result.get("leads"))),
@@ -9166,6 +9458,15 @@ class AppHandler(SimpleHTTPRequestHandler):
                 else:
                     connection.execute("UPDATE notifications SET is_read = 1")
             json_response(self, {"ok": True})
+            return
+
+        if path == "/api/usage/limits":
+            try:
+                usage = set_api_quota_limits(payload.get("limits"))
+            except ValueError as exc:
+                json_response(self, {"error": str(exc)}, 400)
+                return
+            json_response(self, {"ok": True, "apiUsage": usage})
             return
 
         if path == "/api/system/resolve":
