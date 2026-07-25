@@ -150,7 +150,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v10.4-api-quota"
+APP_VERSION = "liquid-calcium-ops-v10.5-procurement"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1301,6 +1301,18 @@ def initialize_database() -> None:
             WHERE opportunity_role = ''
             """
         )
+        connection.execute(
+            """
+            DELETE FROM leads
+            WHERE direction = 'procurement'
+              AND source = '中国政府采购网 / 全国公共资源交易平台'
+              AND (
+                  company LIKE '% · 采购公告'
+                  OR company LIKE '% · 招标公告'
+                  OR company LIKE '% · 中标/成交结果'
+              )
+            """
+        )
 
 
 def log_system_event(
@@ -1400,6 +1412,41 @@ def normalized_company_name(value: Any) -> str:
     return re.sub(r"[\s\-—_·,，.。/]+", "", company)
 
 
+def procurement_company_is_specific(value: Any) -> bool:
+    company = re.sub(r"\s+", " ", str(value or "")).strip()
+    normalized = normalized_company_name(company)
+    if len(normalized) < 4 or company in {"采购单位待核验", "采购单位", "待核验"}:
+        return False
+    notice_labels = ("采购公告", "招标公告", "中标/成交结果", "中标公告", "成交公告")
+    if any(company.endswith(f"· {label}") for label in notice_labels):
+        return False
+    entity_markers = (
+        "公司",
+        "集团",
+        "工厂",
+        "中心",
+        "大学",
+        "学院",
+        "医院",
+        "政府",
+        "委员会",
+        "管理局",
+        "管理处",
+        "事业单位",
+        "研究院",
+        "研究所",
+        "学校",
+        "机场",
+        "水务",
+        "环卫",
+    )
+    if any(label in company for label in notice_labels) and not any(
+        marker in company for marker in entity_markers
+    ):
+        return False
+    return True
+
+
 def lead_dedupe_key(lead: dict[str, Any]) -> str:
     company = normalized_company_name(lead.get("company"))
     direction = str(lead.get("direction") or "downstream")
@@ -1408,8 +1455,12 @@ def lead_dedupe_key(lead: dict[str, Any]) -> str:
         "",
         str(lead.get("project_title") or "").lower(),
     )
-    if direction == "procurement" and project:
-        raw = f"{direction}|{company}|{project}"
+    if direction == "procurement" and procurement_company_is_specific(
+        lead.get("company")
+    ):
+        raw = f"{direction}|{company}"
+    elif direction == "procurement" and project:
+        raw = f"{direction}|project|{project}"
     elif direction == "social":
         platform = str(lead.get("social_platform_id") or lead.get("social_platform") or "")
         account = normalized_company_name(lead.get("social_account") or lead.get("company"))
@@ -1556,7 +1607,18 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         len(company_key) >= 4
         and not any(
             word in company
-            for word in ("开发任务", "搜索任务", "检索入口", "待核验企业", "目标企业", "待识别账号")
+            for word in (
+                "开发任务",
+                "搜索任务",
+                "检索入口",
+                "待核验企业",
+                "目标企业",
+                "待识别账号",
+            )
+        )
+        and (
+            direction != "procurement"
+            or procurement_company_is_specific(company)
         )
     )
     official = any(
@@ -1909,6 +1971,20 @@ def save_leads(
                 "SELECT id, payload FROM leads WHERE dedupe_key = ?",
                 (key,),
             ).fetchone()
+            if (
+                not existing_row
+                and lead.get("direction") == "procurement"
+                and procurement_company_is_specific(lead.get("company"))
+            ):
+                existing_row = connection.execute(
+                    """
+                    SELECT id, payload FROM leads
+                    WHERE direction = 'procurement' AND company = ?
+                    ORDER BY last_seen DESC
+                    LIMIT 1
+                    """,
+                    (lead.get("company"),),
+                ).fetchone()
             existing_payload = json.loads(existing_row["payload"]) if existing_row else {}
             merged = merged_lead_payload(existing_payload, lead)
             score, score_details = calculate_lead_score(merged)
@@ -1919,7 +1995,7 @@ def save_leads(
                 connection.execute(
                     """
                     UPDATE leads SET
-                        company = ?, direction = ?, region = ?, sector = ?,
+                        dedupe_key = ?, company = ?, direction = ?, region = ?, sector = ?,
                         phone = ?, email = ?, company_website = ?, source = ?,
                         score = ?, score_details = ?, payload = ?, last_seen = ?,
                         updated_at = ?, monitor_id = COALESCE(?, monitor_id),
@@ -1930,6 +2006,7 @@ def save_leads(
                     WHERE id = ?
                     """,
                     (
+                        key,
                         merged.get("company", ""),
                         merged.get("direction", "downstream"),
                         merged.get("region", ""),
@@ -3962,6 +4039,131 @@ def procurement_notice_kind(record: dict[str, Any]) -> str:
     return "purchase"
 
 
+def procurement_lead_preference(lead: Lead) -> tuple[int, int, int, str]:
+    notice_day = parse_date_value(lead.notice_date)
+    recency = notice_day.toordinal() if notice_day else 0
+    detail_score = sum(
+        bool(value)
+        for value in (
+            lead.phone,
+            lead.address,
+            lead.deadline,
+            lead.budget,
+            lead.contact_name,
+            lead.agency,
+        )
+    )
+    company_score = 1 if procurement_company_is_specific(lead.company) else 0
+    return recency, detail_score, company_score, lead.notice_date
+
+
+def merge_procurement_lead(existing: Lead, incoming: Lead) -> Lead:
+    previous_title = existing.project_title
+    if procurement_lead_preference(incoming) > procurement_lead_preference(existing):
+        for field in (
+            "project_title",
+            "notice_date",
+            "sector",
+            "website",
+            "search_url",
+            "raw_type",
+            "deadline",
+            "budget",
+            "contact_name",
+            "agency",
+            "pitch",
+            "use_case",
+            "confidence",
+        ):
+            value = getattr(incoming, field)
+            if value:
+                setattr(existing, field, value)
+    if not procurement_company_is_specific(existing.company) and procurement_company_is_specific(
+        incoming.company
+    ):
+        existing.company = incoming.company
+        existing.qcc_url = incoming.qcc_url
+    existing.source = merge_contact_values(existing.source, incoming.source)
+    existing.phone = merge_contact_values(existing.phone, incoming.phone)
+    existing.email = merge_contact_values(existing.email, incoming.email)
+    existing.score = max(existing.score, incoming.score)
+    existing.evidence_count = max(1, existing.evidence_count) + max(
+        1, incoming.evidence_count
+    )
+    for field in ("address", "region", "company_website", "qcc_url"):
+        if not getattr(existing, field) and getattr(incoming, field):
+            setattr(existing, field, getattr(incoming, field))
+    related_titles = [
+        title
+        for title in (previous_title, incoming.project_title)
+        if title and title != existing.project_title
+    ]
+    for related_title in dict.fromkeys(related_titles):
+        addition = f"关联公告：{related_title}"
+        if addition not in existing.process_basis:
+            existing.process_basis = (
+                f"{existing.process_basis}；{addition}"
+                if existing.process_basis
+                else addition
+            )[:1600]
+    if incoming.match_reason and incoming.match_reason not in existing.match_reason:
+        existing.match_reason = (
+            f"{existing.match_reason}；多源补充：{incoming.match_reason}"
+        )[:1600]
+    return existing
+
+
+def merge_procurement_company_leads(leads: list[Lead]) -> list[Lead]:
+    by_project: dict[str, Lead] = {}
+    for index, lead in enumerate(leads):
+        lead.evidence_count = max(1, lead.evidence_count)
+        normalized_title = re.sub(
+            r"[\s\-—_（）()【】\[\]：:]+",
+            "",
+            lead.project_title.lower(),
+        )
+        normalized_url = re.sub(
+            r"[?#].*$",
+            "",
+            (lead.search_url or lead.website).lower(),
+        )
+        key = normalized_title or normalized_url or f"record-{index}"
+        existing = by_project.get(key)
+        if existing:
+            merge_procurement_lead(existing, lead)
+        else:
+            by_project[key] = lead
+
+    by_company: dict[str, Lead] = {}
+    for index, lead in enumerate(by_project.values()):
+        if procurement_company_is_specific(lead.company):
+            key = f"company:{normalized_company_name(lead.company)}"
+        else:
+            unresolved_title = re.sub(r"\s+", "", lead.project_title)
+            key = f"unresolved:{unresolved_title}:{index}"
+        existing = by_company.get(key)
+        if existing:
+            merge_procurement_lead(existing, lead)
+        else:
+            by_company[key] = lead
+
+    for lead in by_company.values():
+        lead.process_basis = (
+            f"{lead.process_basis}；已归集 {max(1, lead.evidence_count)} 条相关公告"
+            if lead.process_basis
+            else f"已归集 {max(1, lead.evidence_count)} 条相关公告"
+        )[:1600]
+    return sorted(
+        by_company.values(),
+        key=lambda item: (
+            procurement_company_is_specific(item.company),
+            item.score,
+            procurement_lead_preference(item),
+        ),
+        reverse=True,
+    )
+
+
 def collect_procurement_companies(
     regions: list[str],
     sectors: dict[str, dict[str, Any]],
@@ -4016,10 +4218,7 @@ def collect_procurement_companies(
         for record in ((data.get("data") or {}).get("records") or []):
             record_id = str(record.get("id") or "")
             province = str(record.get("provinceText") or "")
-            if not record_id or not any(
-                region.replace("省", "") in province.replace("省", "")
-                for region in regions
-            ):
+            if not record_id or not region_selected(province, regions):
                 continue
             if notice_type_ids and procurement_notice_kind(record) not in notice_type_ids:
                 continue
@@ -8049,38 +8248,45 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             leads.extend(website_leads)
             errors.extend(website_errors)
             request_count += website_requests
-        deduped: dict[str, Lead] = {}
-        for lead in leads:
-            normalized_title = re.sub(r"[\s\-—_（）()【】\[\]：:]+", "", lead.project_title)
-            normalized_company = re.sub(r"\s+", "", lead.company)
-            key = (
-                f"{normalized_company}|{normalized_title}"
-                if normalized_title
-                else f"{normalized_company}|{lead.website}"
-            )
-            deduped.setdefault(key, lead)
-        leads = list(deduped.values())
-        leads = sorted(leads, key=lambda item: item.score, reverse=True)
+        leads = [
+            lead
+            for lead in merge_procurement_company_leads(leads)
+            if procurement_company_is_specific(lead.company)
+        ]
+        manual_searches: list[dict[str, str]] = []
         if not leads:
-            leads = procurement_monitor_entries(
-                regions,
-                sectors,
-                custom_keywords,
-                notice_type_ids,
-                date_window_id,
+            manual_searches = [
+                {
+                    "label": item.company,
+                    "ccgp": item.search_url,
+                    "ggzy": item.website,
+                }
+                for item in procurement_monitor_entries(
+                    regions,
+                    sectors,
+                    custom_keywords,
+                    notice_type_ids,
+                    date_window_id,
+                )[:12]
+            ]
+        specific_company_count = len(
+            [lead for lead in leads if procurement_company_is_specific(lead.company)]
+        )
+        announcement_count = sum(max(1, lead.evidence_count) for lead in leads)
+        no_results_reason = ""
+        if not leads:
+            no_results_reason = (
+                "所选时间、地区和关键词下暂未发现可确认采购单位的公告。"
+                "搜索入口仅作为辅助，不再保存为公司线索。"
             )
-            if leads:
-                errors.insert(
-                    0,
-                    "官方平台暂未返回具体公告，已生成中国政府采购网/公共资源交易平台检索入口。",
-                )
         prepared_leads = prepare_lead_results(leads)
         return {
             "leads": prepared_leads,
             "errors": errors[:40],
             "meta": {
                 "count": len(leads),
-                "companyCount": len(leads),
+                "companyCount": specific_company_count,
+                "announcementCount": announcement_count,
                 "phoneCount": len([lead for lead in leads if lead.phone]),
                 "requestCount": request_count,
                 "workers": 4,
@@ -8091,6 +8297,8 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "noticeTypes": [PROCUREMENT_NOTICE_TYPES[item] for item in notice_type_ids if item in PROCUREMENT_NOTICE_TYPES],
                 "procurementSources": procurement_sources,
                 "dateWindow": PROCUREMENT_DATE_WINDOWS.get(date_window_id, PROCUREMENT_DATE_WINDOWS["10d"])[0],
+                "noResultsReason": no_results_reason,
+                "manualSearches": manual_searches,
                 "qualitySummary": lead_quality_summary(prepared_leads),
                 "mode": "procurement",
             },

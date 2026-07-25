@@ -1355,7 +1355,7 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(collect_amap.call_count, 2)
 
     @patch("app.collect_procurement_companies")
-    def test_procurement_falls_back_to_official_search_entries(self, collect_procurement):
+    def test_procurement_does_not_save_search_entries_as_companies(self, collect_procurement):
         collect_procurement.return_value = ([], ["公共资源平台暂时无结果"], 1)
 
         result = app.collect_leads(
@@ -1369,9 +1369,125 @@ class LiquidCalciumAppTests(unittest.TestCase):
             }
         )
 
-        self.assertGreater(len(result["leads"]), 0)
-        self.assertIn("检索入口", result["errors"][0])
-        self.assertEqual(result["leads"][0]["direction"], "procurement")
+        self.assertEqual(result["leads"], [])
+        self.assertIn("不再保存为公司线索", result["meta"]["noResultsReason"])
+        self.assertGreater(len(result["meta"]["manualSearches"]), 0)
+
+    def test_procurement_results_merge_by_company_and_keep_richer_contact(self):
+        leads = app.merge_procurement_company_leads(
+            [
+                app.Lead(
+                    company="山东某水务集团有限公司",
+                    region="山东",
+                    sector="采购公告",
+                    source="全国公共资源交易平台",
+                    score=70,
+                    project_title="2026年液体氯化钙采购项目",
+                    notice_date="2026-07-20",
+                    search_url="https://example.com/notice-1",
+                    direction="procurement",
+                ),
+                app.Lead(
+                    company="山东某水务集团有限公司",
+                    region="山东",
+                    sector="招标公告",
+                    source="中国政府采购网",
+                    score=76,
+                    phone="0531-88888888",
+                    address="济南市工业北路",
+                    project_title="液体氯化钙年度框架招标",
+                    notice_date="2026-07-22",
+                    search_url="https://example.com/notice-2",
+                    direction="procurement",
+                ),
+            ]
+        )
+
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0].company, "山东某水务集团有限公司")
+        self.assertEqual(leads[0].phone, "0531-88888888")
+        self.assertEqual(leads[0].project_title, "液体氯化钙年度框架招标")
+        self.assertEqual(leads[0].evidence_count, 2)
+        self.assertIn("全国公共资源交易平台", leads[0].source)
+        self.assertIn("中国政府采购网", leads[0].source)
+
+    def test_procurement_generic_search_label_is_not_a_concrete_company(self):
+        lead = app.prepare_lead_payload(
+            {
+                "company": "液体氯化钙 · 采购公告",
+                "direction": "procurement",
+                "source": "中国政府采购网 / 全国公共资源交易平台",
+                "confidence": "官方检索",
+                "score": 84,
+                "match_reason": "采购公告",
+            }
+        )
+
+        self.assertFalse(app.procurement_company_is_specific(lead["company"]))
+        self.assertEqual(lead["quality_grade"], "D")
+
+    @patch("app.collect_procurement_companies")
+    def test_procurement_drops_notices_without_specific_buyer(self, collect_procurement):
+        collect_procurement.return_value = (
+            [
+                app.Lead(
+                    company="采购单位待核验",
+                    region="山东",
+                    sector="采购公告",
+                    source="中国政府采购网",
+                    score=72,
+                    project_title="液体氯化钙采购项目",
+                    notice_date="2026-07-22",
+                    search_url="https://example.com/unresolved-notice",
+                    direction="procurement",
+                )
+            ],
+            [],
+            1,
+        )
+
+        result = app.collect_leads(
+            {
+                "direction": "procurement",
+                "regions": ["山东"],
+                "sectors": ["liquid_calcium_chloride"],
+                "noticeTypes": ["purchase"],
+                "procurementSources": ["ggzy"],
+                "dateWindow": "30d",
+            }
+        )
+
+        self.assertEqual(result["leads"], [])
+        self.assertEqual(result["meta"]["companyCount"], 0)
+        self.assertIn("暂未发现可确认采购单位", result["meta"]["noResultsReason"])
+
+    def test_procurement_persistence_uses_one_company_profile(self):
+        first = {
+            "company": "山东采购归并水务集团有限公司",
+            "direction": "procurement",
+            "source": "全国公共资源交易平台",
+            "score": 70,
+            "project_title": "液体氯化钙采购项目",
+            "notice_date": "2026-07-20",
+        }
+        second = {
+            **first,
+            "source": "中国政府采购网",
+            "phone": "0531-66668888",
+            "project_title": "液体氯化钙年度招标",
+            "notice_date": "2026-07-22",
+        }
+
+        first_result = app.save_leads([first])
+        second_result = app.save_leads([second])
+        saved = app.list_saved_leads(
+            {"q": "山东采购归并水务集团", "direction": "procurement"}
+        )
+
+        self.assertEqual(first_result["created"], 1)
+        self.assertEqual(second_result["updated"], 1)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["phone"], "0531-66668888")
 
     @patch("app.fetch_permit_records")
     def test_environmental_permit_timeout_uses_verified_index(self, fetch_permit_records):

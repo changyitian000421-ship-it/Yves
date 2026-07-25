@@ -145,12 +145,12 @@
                   四川省平台
                 </label>
                 <label>
-                  <input type="checkbox" name="procurementSource" value="company_website" />
+                  <input type="checkbox" name="procurementSource" value="company_website" checked />
                   企业官网
                 </label>
               </div>
               <div class="direction-note">
-                省级平台仅在所选地区包含对应省份或全国时采集；企业官网模式会先定位公司，再检查采购栏目。
+                结果按采购单位归并；企业官网会先定位目标公司，再核验采购栏目。没有具体采购单位的搜索入口不会写入线索库。
               </div>
               <div class="section-title">公告类型</div>
               <div class="notice-type-grid">
@@ -833,6 +833,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=api-quota-1"></script>
+    <script src="/app.js?v=procurement-2"></script>
   </body>
 </html>

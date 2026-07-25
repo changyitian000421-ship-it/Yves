@@ -79,7 +79,7 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const desktopWorkspace = window.matchMedia("(min-width: 981px)");
 const SIDEBAR_STORAGE_KEY = "lead-cockpit-sidebar-collapsed";
-const SEARCH_DRAFT_STORAGE_KEY = "lead-cockpit-search-drafts-v1";
+const SEARCH_DRAFT_STORAGE_KEY = "lead-cockpit-search-drafts-v2";
 const LEAD_STORE_TTL_MS = 60000;
 let filterRenderTimer = 0;
 
@@ -1434,7 +1434,7 @@ function setDirection(direction) {
     : environmental
       ? "交叉检索排污许可、环评验收、自行监测和处罚整改，只保留有具体企业及含氟废水证据的结果。"
     : procurement
-      ? "自动聚合全国、中央及已接入的省级官方采购平台，也可检查企业官网。"
+      ? "按具体采购单位归并官方公告，并默认核验企业官网；无法确认采购单位的搜索入口不会写入线索库。"
       : "查找可能采购氯化钙的下游企业。";
   $("#custom-keywords").placeholder = social
     ? "例如：液钙求购, 副产液钙处置, 含氟废水, 除氟改造"
@@ -1770,7 +1770,8 @@ function applySearchResult(data) {
         company_website: "企业官网",
       })[source] || source).join("、")}。`
     : data.meta?.mode === "procurement"
-      ? `已采集 ${state.leads.length} 条招采公告，其中 ${phoneCount} 条含采购单位电话；来源：${(data.meta?.procurementSources || []).map((source) => ({
+      ? state.leads.length
+        ? `已归集 ${realCount} 家具体采购单位，关联 ${data.meta?.announcementCount || state.leads.length} 条公告，其中 ${phoneCount} 家有电话；来源：${(data.meta?.procurementSources || []).map((source) => ({
         ggzy: "全国公共资源",
         ccgp: "中国政府采购网",
         zycg: "中央政府采购网",
@@ -1778,6 +1779,7 @@ function applySearchResult(data) {
         sichuan: "四川省平台",
         company_website: "企业官网",
       })[source] || source).join("、") || "官方平台"}。`
+        : data.meta?.noResultsReason || "没有找到符合条件的具体采购单位。"
       : data.meta?.mode === "need_key"
       ? "未开始采集。"
       : `已生成 ${state.leads.length} 条开发任务。`;
@@ -1837,6 +1839,7 @@ function showCompanyDetail(lead) {
     detailItem("建议下一步", lead.recommended_action),
     detailPhoneItem(lead.phone),
     detailItem("采购项目", procurement ? lead.project_title : ""),
+    detailItem("关联公告数量", procurement ? lead.evidence_count : ""),
     detailItem("社媒平台", social ? lead.social_platform : ""),
     detailItem("公开账号", social ? lead.social_account : ""),
     detailItem("内容标题", social ? lead.project_title : ""),
