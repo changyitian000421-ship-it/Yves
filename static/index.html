@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=api-quota-1" />
+    <link rel="stylesheet" href="/styles.css?v=sales-workbench-1" />
   </head>
   <body>
     <div class="app">
@@ -294,6 +294,10 @@
 
         <nav class="workspace-tabs" aria-label="工作区">
           <button type="button" data-view="collect" class="active">采集结果</button>
+          <button type="button" data-view="workbench">
+            今日工作台
+            <span id="workbench-count" class="tab-count">0</span>
+          </button>
           <button type="button" data-view="database">
             线索数据库
             <span id="database-count" class="tab-count">0</span>
@@ -393,7 +397,9 @@
               <span>销售工作队列</span>
               <select id="work-queue-filter">
                 <option value="">全部线索</option>
+                <option value="overdue">逾期未跟进</option>
                 <option value="due">今日待跟进</option>
+                <option value="active">有需求/报价中</option>
                 <option value="hot-new">高潜待联系</option>
                 <option value="unassigned">未分配负责人</option>
                 <option value="new">新发现待核实</option>
@@ -467,6 +473,39 @@
             <span><strong id="progress-requests">0 / 0</strong> <span id="progress-requests-label">请求</span></span>
             <span><strong id="progress-companies">0</strong> <span id="progress-companies-label">企业</span></span>
             <span><strong id="progress-phones">0</strong> <span id="progress-phones-label">有电话</span></span>
+          </div>
+        </section>
+
+        <section id="sales-workbench-panel" class="sales-workbench-panel" hidden>
+          <div class="workbench-toolbar">
+            <div>
+              <h3>今日销售工作台</h3>
+              <p>系统按跟进时间、销售阶段、线索质量和联系方式自动排列处理顺序。</p>
+            </div>
+            <button id="workbench-next-button" class="primary" type="button">处理下一条</button>
+          </div>
+          <div id="workbench-summary" class="workbench-summary"></div>
+          <div class="workbench-columns">
+            <section class="workbench-priority">
+              <div class="workbench-section-head">
+                <div>
+                  <h4>优先行动</h4>
+                  <p>先处理逾期、报价中和有明确联系方式的高潜企业。</p>
+                </div>
+                <span id="workbench-priority-count">0 条待处理</span>
+              </div>
+              <div id="workbench-priority-list" class="workbench-priority-list"></div>
+            </section>
+            <aside class="workbench-insights">
+              <section>
+                <h4>销售漏斗</h4>
+                <div id="workbench-pipeline" class="workbench-pipeline"></div>
+              </section>
+              <section>
+                <h4>数据完善</h4>
+                <div id="workbench-data-health" class="workbench-data-health"></div>
+              </section>
+            </aside>
           </div>
         </section>
 
@@ -583,6 +622,13 @@
           </label>
           <button id="social-entity-confirm" class="secondary" type="button">确认并进入公司档案</button>
         </div>
+      </section>
+      <section id="lead-activity-panel" class="lead-activity-panel" hidden>
+        <div class="lead-activity-head">
+          <strong>跟进时间线</strong>
+          <span>自动保留状态和负责人变更记录</span>
+        </div>
+        <div id="lead-activity-list" class="lead-activity-list"></div>
       </section>
       <form id="sales-form" class="sales-form" hidden>
         <input id="sales-lead-id" type="hidden" />
@@ -833,6 +879,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=procurement-2"></script>
+    <script src="/app.js?v=sales-workbench-1"></script>
   </body>
 </html>

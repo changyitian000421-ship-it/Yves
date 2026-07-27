@@ -56,6 +56,28 @@ else:
     TURSO_IMPORT_ERROR = None
 
 
+def bounded_int(
+    value: Any,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def env_bounded_int(
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    return bounded_int(os.getenv(name), default, minimum, maximum)
+
+
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DEFAULT_PORT = 8765
@@ -91,20 +113,19 @@ ALIYUN_PNVS_ACCESS_KEY_SECRET = (
 ALIYUN_PNVS_SCHEME_NAME = os.getenv("ALIYUN_PNVS_SCHEME_NAME", "")
 ALIYUN_PNVS_SIGN_NAME = os.getenv("ALIYUN_PNVS_SIGN_NAME", "速通互联验证码")
 ALIYUN_PNVS_TEMPLATE_CODE = os.getenv("ALIYUN_PNVS_TEMPLATE_CODE", "100001")
-AMAP_WORKERS = max(1, min(int(os.getenv("AMAP_WORKERS", "4")), 8))
+AMAP_WORKERS = env_bounded_int("AMAP_WORKERS", 4, 1, 8)
 AMAP_RETRY_CODES = {"10015", "10016", "10019", "10020", "10021"}
-BAIDU_MAP_WORKERS = max(1, min(int(os.getenv("BAIDU_MAP_WORKERS", "4")), 8))
+BAIDU_MAP_WORKERS = env_bounded_int("BAIDU_MAP_WORKERS", 4, 1, 8)
 BAIDU_MAP_RETRY_CODES = {401}
-TIANDITU_WORKERS = max(1, min(int(os.getenv("TIANDITU_WORKERS", "4")), 8))
+TIANDITU_WORKERS = env_bounded_int("TIANDITU_WORKERS", 4, 1, 8)
 TIANDITU_RETRY_CODES = {3000}
 BAIDU_SEARCH_ENDPOINT = "https://qianfan.baidubce.com/v2/ai_search/web_search"
-BAIDU_SEARCH_CACHE_DAYS = max(
+BAIDU_SEARCH_CACHE_DAYS = env_bounded_int("BAIDU_SEARCH_CACHE_DAYS", 7, 1, 30)
+BAIDU_SEARCH_DAILY_LIMIT = env_bounded_int(
+    "BAIDU_SEARCH_DAILY_LIMIT",
+    45,
     1,
-    min(int(os.getenv("BAIDU_SEARCH_CACHE_DAYS", "7")), 30),
-)
-BAIDU_SEARCH_DAILY_LIMIT = max(
-    1,
-    min(int(os.getenv("BAIDU_SEARCH_DAILY_LIMIT", "45")), 500),
+    500,
 )
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 API_PROVIDERS = {
@@ -116,22 +137,37 @@ API_PROVIDERS = {
     "amap": {
         "label": "高德地图",
         "category": "企业地点",
-        "defaultLimit": max(0, int(os.getenv("AMAP_DAILY_LIMIT", "0"))),
+        "defaultLimit": env_bounded_int("AMAP_DAILY_LIMIT", 0, 0, 100_000_000),
     },
     "baidu_map": {
         "label": "百度地图",
         "category": "企业地点",
-        "defaultLimit": max(0, int(os.getenv("BAIDU_MAP_DAILY_LIMIT", "0"))),
+        "defaultLimit": env_bounded_int(
+            "BAIDU_MAP_DAILY_LIMIT",
+            0,
+            0,
+            100_000_000,
+        ),
     },
     "tianditu": {
         "label": "天地图",
         "category": "企业地点",
-        "defaultLimit": max(0, int(os.getenv("TIANDITU_DAILY_LIMIT", "0"))),
+        "defaultLimit": env_bounded_int(
+            "TIANDITU_DAILY_LIMIT",
+            0,
+            0,
+            100_000_000,
+        ),
     },
     "aliyun_sms": {
         "label": "阿里云短信",
         "category": "登录验证",
-        "defaultLimit": max(0, int(os.getenv("ALIYUN_SMS_DAILY_LIMIT", "0"))),
+        "defaultLimit": env_bounded_int(
+            "ALIYUN_SMS_DAILY_LIMIT",
+            0,
+            0,
+            100_000_000,
+        ),
     },
 }
 API_USAGE_BUFFER: dict[str, int] = {}
@@ -150,7 +186,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v10.5-procurement"
+APP_VERSION = "liquid-calcium-ops-v11.0-sales-workbench"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -1913,6 +1949,93 @@ def create_manual_lead(payload: dict[str, Any]) -> dict[str, Any]:
     return {"lead": get_saved_lead(lead_id), "persistence": persistence}
 
 
+def update_lead_sales_record(payload: dict[str, Any]) -> dict[str, Any]:
+    lead_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
+    if not lead_id:
+        raise ValueError("线索编号无效")
+    status = str(payload.get("salesStatus") or "new")
+    if status not in SALES_STATUSES:
+        raise ValueError("销售状态无效")
+    opportunity_role = clipped_text(payload, "opportunityRole", 20)
+    if opportunity_role not in {"", "buyer", "supplier", "prospect"}:
+        raise ValueError("商机角色无效")
+
+    owner = clipped_text(payload, "owner", 80)
+    notes = clipped_text(payload, "notes", 5000)
+    next_follow_up = clipped_text(payload, "nextFollowUp", 40)
+    sales_fields = {
+        "opportunity_role": opportunity_role,
+        "liquid_concentration": clipped_text(payload, "liquidConcentration", 80),
+        "monthly_volume": clipped_text(payload, "monthlyVolume", 80),
+        "impurity_profile": clipped_text(payload, "impurityProfile", 500),
+        "logistics_radius": clipped_text(payload, "logisticsRadius", 80),
+        "storage_condition": clipped_text(payload, "storageCondition", 300),
+        "commercial_value": clipped_text(payload, "commercialValue", 80),
+    }
+
+    with DATABASE_LOCK, database_connection() as connection:
+        existing = connection.execute(
+            "SELECT company, payload FROM leads WHERE id = ?",
+            (lead_id,),
+        ).fetchone()
+        if not existing:
+            raise LookupError("线索不存在")
+        score_input = json.loads(existing["payload"] or "{}")
+        score_input.update(sales_fields)
+        score_input.update(
+            {
+                "sales_status": status,
+                "owner": owner,
+                "notes": notes,
+                "next_follow_up": next_follow_up,
+            }
+        )
+        score, score_details = calculate_lead_score(score_input)
+        score_input["score"] = score
+        score_input["score_details"] = score_details
+        score_input.update(lead_quality_profile(score_input))
+        connection.execute(
+            """
+            UPDATE leads SET sales_status = ?, owner = ?, notes = ?,
+                next_follow_up = ?, is_new = 0, updated_at = ?,
+                opportunity_role = ?, liquid_concentration = ?,
+                monthly_volume = ?, impurity_profile = ?,
+                logistics_radius = ?, storage_condition = ?,
+                commercial_value = ?, score = ?, score_details = ?,
+                payload = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                owner,
+                notes,
+                next_follow_up,
+                now_iso(),
+                sales_fields["opportunity_role"],
+                sales_fields["liquid_concentration"],
+                sales_fields["monthly_volume"],
+                sales_fields["impurity_profile"],
+                sales_fields["logistics_radius"],
+                sales_fields["storage_condition"],
+                sales_fields["commercial_value"],
+                score,
+                json.dumps(score_details, ensure_ascii=False),
+                json.dumps(score_input, ensure_ascii=False),
+                lead_id,
+            ),
+        )
+
+    create_follow_up_notifications()
+    log_activity(
+        "update",
+        "lead",
+        f"更新 {existing['company']} 的销售档案，状态：{SALES_STATUSES[status]}",
+        lead_id,
+        {"owner": owner, "nextFollowUp": next_follow_up},
+    )
+    return get_saved_lead(lead_id) or {}
+
+
 def save_leads(
     leads: list[dict[str, Any]],
     monitor_id: int | None = None,
@@ -2131,6 +2254,37 @@ def lead_row_payload(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+def lead_activity_history(lead_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    safe_limit = bounded_int(limit, 20, 1, 50)
+    with DATABASE_LOCK, database_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, action, summary, details, created_at
+            FROM activity_log
+            WHERE entity_type = 'lead' AND entity_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (lead_id, safe_limit),
+        ).fetchall()
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            details = json.loads(row["details"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            details = {}
+        history.append(
+            {
+                "id": row["id"],
+                "action": row["action"],
+                "summary": row["summary"],
+                "details": details,
+                "createdAt": row["created_at"],
+            }
+        )
+    return history
+
+
 def list_saved_leads(params: dict[str, str]) -> list[dict[str, Any]]:
     conditions = ["1 = 1"]
     values: list[Any] = []
@@ -2148,7 +2302,7 @@ def list_saved_leads(params: dict[str, str]) -> list[dict[str, Any]]:
             "(company LIKE ? OR sector LIKE ? OR region LIKE ? OR phone LIKE ? OR notes LIKE ?)"
         )
         values.extend([f"%{query}%"] * 5)
-    limit = max(1, min(int(params.get("limit", "1000") or 1000), 5000))
+    limit = bounded_int(params.get("limit"), 1000, 1, 5000)
     with DATABASE_LOCK, database_connection() as connection:
         rows = connection.execute(
             f"""
@@ -2174,7 +2328,11 @@ def get_saved_lead(lead_id: int) -> dict[str, Any] | None:
             "SELECT * FROM leads WHERE id = ?",
             (lead_id,),
         ).fetchone()
-    return lead_row_payload(row) if row else None
+    if not row:
+        return None
+    payload = lead_row_payload(row)
+    payload["activity_history"] = lead_activity_history(lead_id)
+    return payload
 
 
 def attach_saved_lead_ids(leads: list[dict[str, Any]]) -> None:
@@ -2323,9 +2481,90 @@ def dashboard_summary() -> dict[str, Any]:
         supplier_count = connection.execute(
             "SELECT COUNT(*) FROM leads WHERE opportunity_role = 'supplier'"
         ).fetchone()[0]
+        profile_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE sales_status != 'new'
+               OR owner != ''
+               OR notes != ''
+               OR next_follow_up != ''
+               OR source LIKE '%手动新增档案%'
+               OR liquid_concentration != ''
+               OR monthly_volume != ''
+               OR impurity_profile != ''
+               OR logistics_radius != ''
+               OR storage_condition != ''
+               OR commercial_value != ''
+            """
+        ).fetchone()[0]
+        overdue = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE next_follow_up != ''
+              AND substr(next_follow_up, 1, 10) < ?
+              AND sales_status NOT IN ('won', 'lost')
+            """,
+            (today,),
+        ).fetchone()[0]
+        due_today = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE substr(next_follow_up, 1, 10) = ?
+              AND sales_status NOT IN ('won', 'lost')
+            """,
+            (today,),
+        ).fetchone()[0]
+        hot_uncontacted = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE sales_status = 'new'
+              AND score >= 70
+              AND (phone != '' OR email != '')
+              AND direction != 'competitor'
+            """
+        ).fetchone()[0]
+        active_opportunities = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE sales_status IN ('qualified', 'quoted')
+            """
+        ).fetchone()[0]
+        needs_contact = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE phone = '' AND email = ''
+              AND sales_status NOT IN ('won', 'lost')
+              AND direction != 'competitor'
+            """
+        ).fetchone()[0]
+        unassigned = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE owner = ''
+              AND sales_status NOT IN ('won', 'lost')
+              AND direction != 'competitor'
+            """
+        ).fetchone()[0]
+        priority_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM leads
+            WHERE sales_status NOT IN ('won', 'lost')
+              AND direction != 'competitor'
+              AND (
+                  (next_follow_up != '' AND substr(next_follow_up, 1, 10) <= ?)
+                  OR sales_status IN ('qualified', 'quoted')
+                  OR (
+                      sales_status = 'new' AND score >= 70
+                      AND (phone != '' OR email != '')
+                  )
+              )
+            """,
+            (today,),
+        ).fetchone()[0]
         api_usage = api_usage_overview(connection)
     return {
         "total": total,
+        "profileCount": profile_count,
         "highScore": high_score,
         "dueFollowUps": due,
         "unreadNotifications": unread,
@@ -2333,6 +2572,15 @@ def dashboard_summary() -> dict[str, Any]:
         "buyerCount": buyer_count,
         "supplierCount": supplier_count,
         "statuses": {row["sales_status"]: row["count"] for row in status_rows},
+        "salesWorkspace": {
+            "overdue": overdue,
+            "dueToday": due_today,
+            "hotUncontacted": hot_uncontacted,
+            "activeOpportunities": active_opportunities,
+            "needsContact": needs_contact,
+            "unassigned": unassigned,
+            "priorityCount": priority_count,
+        },
         "apiUsage": api_usage,
     }
 
@@ -7874,7 +8122,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
         for item in re.split(r"[,，\n]+", str(payload.get("customKeywords") or ""))
         if item.strip()
     ]
-    pages = int(payload.get("pages") or 1)
+    pages = bounded_int(payload.get("pages"), 1, 1, 10)
     fast_mode = bool(payload.get("fastMode", True))
     keyword_limit = 2 if fast_mode else 8
     amap_key = (
@@ -8824,14 +9072,9 @@ def start_monitor_background(monitor_id: int) -> None:
     def worker() -> None:
         try:
             _run_monitor(monitor_id)
-        except Exception as exc:  # noqa: BLE001 - keep background failures visible in system center.
-            log_system_event(
-                "error",
-                "monitor",
-                str(exc),
-                source="手动运行监控",
-                details={"monitorId": monitor_id},
-            )
+        except Exception:
+            # _run_monitor has already persisted the failure against the task.
+            pass
         finally:
             with MONITOR_RUNNING_LOCK:
                 MONITOR_RUNNING.discard(monitor_id)
@@ -8840,7 +9083,7 @@ def start_monitor_background(monitor_id: int) -> None:
 
 
 def create_follow_up_notifications() -> None:
-    today = date.today().isoformat()
+    today = datetime.now(CHINA_TZ).date().isoformat()
     with DATABASE_LOCK, database_connection() as connection:
         due_rows = connection.execute(
             """
@@ -9450,83 +9693,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/leads/update":
-            lead_id = int(payload.get("id") or 0)
-            status = str(payload.get("salesStatus") or "new")
-            if status not in SALES_STATUSES:
-                json_response(self, {"error": "销售状态无效"}, 400)
+            try:
+                lead = update_lead_sales_record(payload)
+            except ValueError as exc:
+                json_response(self, {"error": str(exc)}, 400)
                 return
-            owner = str(payload.get("owner") or "").strip()[:80]
-            notes = str(payload.get("notes") or "").strip()[:5000]
-            next_follow_up = str(payload.get("nextFollowUp") or "").strip()[:40]
-            opportunity_role = str(payload.get("opportunityRole") or "").strip()[:20]
-            liquid_concentration = str(payload.get("liquidConcentration") or "").strip()[:80]
-            monthly_volume = str(payload.get("monthlyVolume") or "").strip()[:80]
-            impurity_profile = str(payload.get("impurityProfile") or "").strip()[:500]
-            logistics_radius = str(payload.get("logisticsRadius") or "").strip()[:80]
-            storage_condition = str(payload.get("storageCondition") or "").strip()[:300]
-            commercial_value = str(payload.get("commercialValue") or "").strip()[:80]
-            with DATABASE_LOCK, database_connection() as connection:
-                existing = connection.execute(
-                    "SELECT payload FROM leads WHERE id = ?",
-                    (lead_id,),
-                ).fetchone()
-                if not existing:
-                    json_response(self, {"error": "线索不存在"}, 404)
-                    return
-                score_input = json.loads(existing["payload"] or "{}")
-                score_input.update(
-                    {
-                        "opportunity_role": opportunity_role,
-                        "liquid_concentration": liquid_concentration,
-                        "monthly_volume": monthly_volume,
-                        "impurity_profile": impurity_profile,
-                        "logistics_radius": logistics_radius,
-                        "storage_condition": storage_condition,
-                        "commercial_value": commercial_value,
-                    }
-                )
-                score, score_details = calculate_lead_score(score_input)
-                cursor = connection.execute(
-                    """
-                    UPDATE leads SET sales_status = ?, owner = ?, notes = ?,
-                        next_follow_up = ?, is_new = 0, updated_at = ?,
-                        opportunity_role = ?, liquid_concentration = ?,
-                        monthly_volume = ?, impurity_profile = ?,
-                        logistics_radius = ?, storage_condition = ?,
-                        commercial_value = ?, score = ?, score_details = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        status,
-                        owner,
-                        notes,
-                        next_follow_up,
-                        now_iso(),
-                        opportunity_role,
-                        liquid_concentration,
-                        monthly_volume,
-                        impurity_profile,
-                        logistics_radius,
-                        storage_condition,
-                        commercial_value,
-                        score,
-                        json.dumps(score_details, ensure_ascii=False),
-                        lead_id,
-                    ),
-                )
-            create_follow_up_notifications()
-            log_activity(
-                "update",
-                "lead",
-                f"更新线索销售档案，状态：{SALES_STATUSES[status]}",
-                lead_id,
-                {"owner": owner, "nextFollowUp": next_follow_up},
-            )
-            json_response(self, {"ok": True})
+            except LookupError as exc:
+                json_response(self, {"error": str(exc)}, 404)
+                return
+            json_response(self, {"ok": True, "lead": lead})
             return
 
         if path == "/api/leads/social-feedback":
-            lead_id = int(payload.get("id") or 0)
+            lead_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             try:
                 lead = update_social_feedback(
                     lead_id,
@@ -9542,7 +9721,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/leads/social-entity":
-            lead_id = int(payload.get("id") or 0)
+            lead_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             try:
                 lead = confirm_social_entity(
                     lead_id,
@@ -9588,9 +9767,35 @@ class AppHandler(SimpleHTTPRequestHandler):
             values.append(now_iso())
             placeholders = ",".join("?" for _ in ids)
             with DATABASE_LOCK, database_connection() as connection:
+                actual_ids = [
+                    int(row["id"])
+                    for row in connection.execute(
+                        f"SELECT id FROM leads WHERE id IN ({placeholders})",
+                        ids,
+                    ).fetchall()
+                ]
                 cursor = connection.execute(
                     f"UPDATE leads SET {', '.join(updates)} WHERE id IN ({placeholders})",
                     (*values, *ids),
+                )
+                activity_details = json.dumps(
+                    {
+                        "owner": payload.get("owner", ""),
+                        "nextFollowUp": payload.get("nextFollowUp", ""),
+                        "salesStatus": payload.get("salesStatus", ""),
+                    },
+                    ensure_ascii=False,
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO activity_log (
+                        action, entity_type, entity_id, summary, details, created_at
+                    ) VALUES ('bulk_update', 'lead', ?, '批量更新销售档案', ?, ?)
+                    """,
+                    [
+                        (lead_id, activity_details, now_iso())
+                        for lead_id in actual_ids
+                    ],
                 )
             log_activity(
                 "bulk_update",
@@ -9610,13 +9815,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             monitor_id = save_monitor(
                 str(payload.get("name") or ""),
                 monitor_payload,
-                int(payload.get("intervalHours") or 24),
+                bounded_int(payload.get("intervalHours"), 24, 1, 24 * 30),
             )
             json_response(self, {"ok": True, "id": monitor_id})
             return
 
         if path == "/api/monitors/toggle":
-            monitor_id = int(payload.get("id") or 0)
+            monitor_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             enabled = 1 if payload.get("enabled") else 0
             with DATABASE_LOCK, database_connection() as connection:
                 cursor = connection.execute(
@@ -9631,7 +9836,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/monitors/run":
-            monitor_id = int(payload.get("id") or 0)
+            monitor_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             with DATABASE_LOCK, database_connection() as connection:
                 exists = connection.execute(
                     "SELECT 1 FROM monitors WHERE id = ?",
@@ -9649,14 +9854,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/monitors/delete":
-            monitor_id = int(payload.get("id") or 0)
+            monitor_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             with DATABASE_LOCK, database_connection() as connection:
                 connection.execute("DELETE FROM monitors WHERE id = ?", (monitor_id,))
             json_response(self, {"ok": True})
             return
 
         if path == "/api/notifications/read":
-            notification_id = int(payload.get("id") or 0)
+            notification_id = bounded_int(
+                payload.get("id"),
+                0,
+                0,
+                2_147_483_647,
+            )
             with DATABASE_LOCK, database_connection() as connection:
                 if notification_id:
                     connection.execute(
@@ -9678,7 +9888,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/system/resolve":
-            event_id = int(payload.get("id") or 0)
+            event_id = bounded_int(payload.get("id"), 0, 0, 2_147_483_647)
             with DATABASE_LOCK, database_connection() as connection:
                 if event_id:
                     connection.execute(

@@ -1317,6 +1317,84 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(leads[0]["liquid_concentration"], "32%")
         self.assertEqual(leads[0]["commercial_value"], "80万元/年")
 
+    def test_sales_fields_survive_later_collection_and_show_history(self):
+        source_lead = {
+            "company": "销售资料持久化水务有限公司",
+            "direction": "downstream",
+            "region": "山东",
+            "sector": "水处理",
+            "source": "高德 POI",
+            "score": 48,
+            "phone": "0531-77778888",
+        }
+        app.save_leads([source_lead])
+        saved = app.list_saved_leads({"q": "销售资料持久化"})[0]
+
+        updated = app.update_lead_sales_record(
+            {
+                "id": saved["id"],
+                "salesStatus": "qualified",
+                "owner": "王销售",
+                "nextFollowUp": "2026-07-28T09:30",
+                "notes": "需要30%液钙，先寄样。",
+                "opportunityRole": "buyer",
+                "liquidConcentration": "30%",
+                "monthlyVolume": "300吨/月",
+                "impurityProfile": "铁离子需低于约定指标",
+                "logisticsRadius": "250公里",
+                "storageCondition": "具备液体储罐",
+                "commercialValue": "60万元/年",
+            }
+        )
+        app.save_leads([{**source_lead, "source": "百度地图 POI"}])
+        recollected = app.get_saved_lead(saved["id"])
+
+        self.assertEqual(updated["sales_status"], "qualified")
+        self.assertEqual(recollected["liquid_concentration"], "30%")
+        self.assertEqual(recollected["monthly_volume"], "300吨/月")
+        self.assertEqual(recollected["commercial_value"], "60万元/年")
+        self.assertIn("高德 POI", recollected["source"])
+        self.assertIn("百度地图 POI", recollected["source"])
+        self.assertEqual(recollected["activity_history"][0]["action"], "update")
+
+    def test_dashboard_profiles_only_count_managed_companies(self):
+        app.save_leads(
+            [
+                {
+                    "company": "尚未跟进线索有限公司",
+                    "direction": "downstream",
+                    "source": "高德 POI",
+                    "score": 45,
+                },
+                {
+                    "company": "高潜待联系线索有限公司",
+                    "direction": "downstream",
+                    "source": "百度地图 POI",
+                    "score": 70,
+                    "phone": "0531-66667777",
+                },
+            ]
+        )
+        managed = app.list_saved_leads({"q": "高潜待联系"})[0]
+        app.update_lead_sales_record(
+            {
+                "id": managed["id"],
+                "salesStatus": "contacted",
+                "owner": "销售甲",
+            }
+        )
+
+        dashboard = app.dashboard_summary()
+
+        self.assertEqual(dashboard["total"], 2)
+        self.assertEqual(dashboard["profileCount"], 1)
+        self.assertEqual(dashboard["salesWorkspace"]["hotUncontacted"], 0)
+
+    def test_bounded_int_uses_defaults_and_limits(self):
+        self.assertEqual(app.bounded_int("invalid", 4, 1, 8), 4)
+        self.assertEqual(app.bounded_int("99", 4, 1, 8), 8)
+        self.assertEqual(app.bounded_int("-5", 4, 1, 8), 1)
+
     @patch("app.collect_amap_leads")
     def test_upstream_collection_relaxes_when_strict_filter_is_empty(self, collect_amap):
         collect_amap.side_effect = [

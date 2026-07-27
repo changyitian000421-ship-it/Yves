@@ -16,6 +16,7 @@ const state = {
   savedLeads: [],
   profiles: [],
   profileFiltered: [],
+  workbenchPriority: [],
   dashboard: {},
   apiUsage: [],
   monitors: [],
@@ -107,6 +108,7 @@ function animateVisibleWorkspace() {
     ".notice:not([hidden])",
     ".quality-summary:not([hidden])",
     ".table-shell:not([hidden])",
+    ".sales-workbench-panel:not([hidden])",
     ".alerts-panel:not([hidden])",
     ".profiles-panel:not([hidden])",
     ".system-panel:not([hidden])",
@@ -123,6 +125,7 @@ function showDialogSmooth(dialog) {
   if (!dialog) return;
   dialog.classList.remove("is-closing");
   if (!dialog.open) dialog.showModal();
+  dialog.scrollTop = 0;
   replayMotion(dialog, "dialog-refresh");
 }
 
@@ -146,6 +149,8 @@ function setupMotion() {
   document.documentElement.classList.add("motion-ready");
   const dynamicContainers = [
     "#lead-body",
+    "#workbench-priority-list",
+    "#workbench-summary",
     "#profile-list",
     "#profile-status-board",
     "#monitor-list",
@@ -225,6 +230,17 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function safeExternalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function selectedValues(name) {
@@ -427,11 +443,89 @@ function workQueueMatches(lead) {
       && String(lead.next_follow_up).slice(0, 10) <= localDateKey()
       && !["won", "lost"].includes(status);
   }
+  if (queue === "overdue") {
+    return Boolean(lead.next_follow_up)
+      && String(lead.next_follow_up).slice(0, 10) < localDateKey()
+      && !["won", "lost"].includes(status);
+  }
   if (queue === "hot-new") return Number(lead.score || 0) >= 70 && status === "new";
+  if (queue === "active") return ["qualified", "quoted"].includes(status);
   if (queue === "unassigned") return !String(lead.owner || "").trim() && !["won", "lost"].includes(status);
   if (queue === "new") return status === "new";
   if (queue === "needs-contact") return !lead.phone && !lead.email;
   return true;
+}
+
+function isManagedProfile(lead) {
+  if ((lead.sales_status || "new") !== "new") return true;
+  if (String(lead.source || "").includes("手动新增档案")) return true;
+  return [
+    lead.owner,
+    lead.notes,
+    lead.next_follow_up,
+    lead.liquid_concentration,
+    lead.monthly_volume,
+    lead.impurity_profile,
+    lead.logistics_radius,
+    lead.storage_condition,
+    lead.commercial_value,
+  ].some((value) => String(value || "").trim());
+}
+
+function leadPriority(lead) {
+  const status = lead.sales_status || "new";
+  if (["won", "lost"].includes(status) || lead.direction === "competitor") return -1;
+  if (["irrelevant", "duplicate"].includes(lead.feedback_status)) return -1;
+  const today = localDateKey();
+  const followUpDay = String(lead.next_follow_up || "").slice(0, 10);
+  let priority = Number(lead.score || 0);
+  if (followUpDay && followUpDay < today) priority += 1000;
+  else if (followUpDay === today) priority += 950;
+  if (status === "quoted") priority += 850;
+  else if (status === "qualified") priority += 740;
+  else if (status === "contacted") priority += 420;
+  else if (status === "new" && Number(lead.score || 0) >= 70) priority += 580;
+  if (lead.phone) priority += 60;
+  else if (lead.email) priority += 30;
+  if (lead.actionable) priority += 80;
+  return priority;
+}
+
+function isWorkbenchPriority(lead) {
+  const status = lead.sales_status || "new";
+  if (["won", "lost"].includes(status) || lead.direction === "competitor") return false;
+  if (["irrelevant", "duplicate"].includes(lead.feedback_status)) return false;
+  const followUpDay = String(lead.next_follow_up || "").slice(0, 10);
+  if (followUpDay && followUpDay <= localDateKey()) return true;
+  if (["qualified", "quoted"].includes(status)) return true;
+  return status === "new"
+    && Number(lead.score || 0) >= 70
+    && Boolean(lead.phone || lead.email);
+}
+
+function leadPriorityReasons(lead) {
+  const reasons = [];
+  const status = lead.sales_status || "new";
+  const today = localDateKey();
+  const followUpDay = String(lead.next_follow_up || "").slice(0, 10);
+  if (followUpDay && followUpDay < today) reasons.push("跟进已逾期");
+  else if (followUpDay === today) reasons.push("今天应跟进");
+  if (status === "quoted") reasons.push("报价推进中");
+  else if (status === "qualified") reasons.push("已确认有需求");
+  else if (status === "contacted") reasons.push("已建立联系");
+  else if (Number(lead.score || 0) >= 70) reasons.push("高潜线索");
+  if (lead.phone) reasons.push("有公开电话");
+  else if (lead.email) reasons.push("有公开邮箱");
+  else reasons.push("需补联系方式");
+  return reasons.slice(0, 3);
+}
+
+function datetimeLocalValue(value) {
+  const match = String(value || "").trim().match(
+    /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}))?/,
+  );
+  if (!match) return "";
+  return `${match[1]}T${match[2] || "09"}:${match[3] || "00"}`;
 }
 
 function currentPageKey() {
@@ -510,6 +604,18 @@ async function copyText(value) {
 }
 
 function renderMetrics(leads) {
+  if (state.view === "workbench") {
+    const workspace = state.dashboard.salesWorkspace || {};
+    $("#metric-count").textContent = workspace.priorityCount || 0;
+    $("#metric-hot").textContent = workspace.overdue || 0;
+    $("#metric-phone").textContent = workspace.activeOpportunities || 0;
+    $("#metric-mode").textContent = workspace.hotUncontacted || 0;
+    $("#metric-count-label").textContent = "优先行动";
+    $("#metric-hot-label").textContent = "逾期跟进";
+    $("#metric-phone-label").textContent = "有效商机";
+    $("#metric-mode-label").textContent = "高潜待联系";
+    return;
+  }
   if (state.view === "profiles") {
     const source = state.profileFiltered.length || $("#filter")?.value || $("#status-filter")?.value || $("#direction-filter")?.value || $("#work-queue-filter")?.value
       ? state.profileFiltered
@@ -638,17 +744,21 @@ function renderLeads() {
         ? `<div class="subline">${escapeHtml(lead.project_title)}</div>`
         : "";
       const companyWebsiteNotice = lead.source?.includes("企业官网");
-      const searchUrl = lead.search_url
-        ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${social ? "打开原内容" : lead.direction === "procurement" ? (companyWebsiteNotice ? "官网公告" : "公告正文") : competitor ? "来源检索" : environmental ? "证据原文" : "搜索"}</a>`
+      const searchHref = safeExternalUrl(lead.search_url);
+      const websiteHref = safeExternalUrl(lead.website);
+      const companyWebsiteHref = safeExternalUrl(lead.company_website);
+      const qccHref = safeExternalUrl(lead.qcc_url);
+      const searchUrl = searchHref
+        ? `<a href="${escapeHtml(searchHref)}" target="_blank" rel="noreferrer">${social ? "打开原内容" : lead.direction === "procurement" ? (companyWebsiteNotice ? "官网公告" : "公告正文") : competitor ? "来源检索" : environmental ? "证据原文" : "搜索"}</a>`
         : "";
-      const website = lead.website && lead.website !== lead.search_url
-        ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公告页面" : competitor ? "证据页" : "核验"}</a>`
+      const website = websiteHref && websiteHref !== searchHref
+        ? `<a href="${escapeHtml(websiteHref)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公告页面" : competitor ? "证据页" : "核验"}</a>`
         : "";
-      const companyWebsite = lead.company_website && (companyWebsiteNotice || competitor)
-        ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>`
+      const companyWebsite = companyWebsiteHref && (companyWebsiteNotice || competitor)
+        ? `<a href="${escapeHtml(companyWebsiteHref)}" target="_blank" rel="noreferrer">企业官网</a>`
         : "";
-      const qcc = lead.qcc_url
-        ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公司核验" : "企查查"}</a>`
+      const qcc = qccHref
+        ? `<a href="${escapeHtml(qccHref)}" target="_blank" rel="noreferrer">${lead.direction === "procurement" ? "公司核验" : "企查查"}</a>`
         : "";
       const detail = `<button class="detail-button" type="button" data-detail-index="${absoluteIndex}">详情</button>`;
       const reverseAction = competitor
@@ -778,7 +888,8 @@ async function loadDashboard() {
   state.apiUsage = state.dashboard.apiUsage || [];
   renderApiUsage(state.apiUsage);
   $("#database-count").textContent = state.dashboard.total || 0;
-  $("#profile-count").textContent = state.dashboard.total || 0;
+  $("#profile-count").textContent = state.dashboard.profileCount || 0;
+  $("#workbench-count").textContent = state.dashboard.salesWorkspace?.priorityCount || 0;
   $("#alert-count").textContent = state.dashboard.unreadNotifications || 0;
   $("#system-count").textContent = state.dashboard.unresolvedEvents || 0;
   if (state.view === "database") renderMetrics(state.filtered);
@@ -865,13 +976,134 @@ async function loadLeadStore(force = false) {
   const data = await fetchJson("/api/leads?limit=5000");
   const leads = data.leads || [];
   state.savedLeads = leads;
-  state.profiles = leads;
+  state.profiles = leads.filter(isManagedProfile);
   state.leadStoreLoadedAt = Date.now();
 }
 
 async function loadSavedLeads(force = false) {
   await loadLeadStore(force);
   $("#export-button").disabled = !state.savedLeads.length;
+  renderLeads();
+}
+
+function renderSalesWorkbench() {
+  const workspace = state.dashboard.salesWorkspace || {};
+  const summaryItems = [
+    {
+      label: "逾期未跟进",
+      value: workspace.overdue || 0,
+      queue: "overdue",
+      tone: "urgent",
+    },
+    {
+      label: "今天应跟进",
+      value: workspace.dueToday || 0,
+      queue: "due",
+      tone: "today",
+    },
+    {
+      label: "有需求/报价中",
+      value: workspace.activeOpportunities || 0,
+      queue: "active",
+      tone: "active",
+    },
+    {
+      label: "高潜待联系",
+      value: workspace.hotUncontacted || 0,
+      queue: "hot-new",
+      tone: "hot",
+    },
+  ];
+  $("#workbench-summary").innerHTML = summaryItems.map((item) => `
+    <button class="workbench-summary-item tone-${escapeHtml(item.tone)}" type="button"
+      data-workbench-queue="${escapeHtml(item.queue)}">
+      <span>${Number(item.value).toLocaleString("zh-CN")}</span>
+      <p>${escapeHtml(item.label)}</p>
+    </button>
+  `).join("");
+
+  state.workbenchPriority = state.savedLeads
+    .filter(isWorkbenchPriority)
+    .map((lead) => ({ lead, priority: leadPriority(lead) }))
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, 20)
+    .map((item) => item.lead);
+  $("#workbench-priority-count").textContent = `${state.workbenchPriority.length} 条待处理`;
+  $("#workbench-next-button").disabled = !state.workbenchPriority.length;
+  $("#workbench-priority-list").innerHTML = state.workbenchPriority.length
+    ? state.workbenchPriority.map((lead, index) => {
+      const reasons = leadPriorityReasons(lead);
+      const phone = splitPhones(lead.phone)[0] || "";
+      const phoneHref = telHref(phone);
+      return `
+        <article class="workbench-lead-row">
+          <div class="workbench-rank">${index + 1}</div>
+          <div class="workbench-lead-main">
+            <div class="workbench-lead-head">
+              <strong>${escapeHtml(lead.company)}</strong>
+              <span class="sales-status status-${escapeHtml(lead.sales_status || "new")}">
+                ${escapeHtml(lead.sales_status_label || SALES_STATUS_LABELS[lead.sales_status || "new"] || "待核实")}
+              </span>
+            </div>
+            <p>${escapeHtml(lead.region || "地区待补充")} · ${escapeHtml(lead.sector || DIRECTION_LABELS[lead.direction] || "行业待补充")}</p>
+            <div class="workbench-reasons">
+              ${reasons.map((reason) => `<span>${escapeHtml(reason)}</span>`).join("")}
+            </div>
+          </div>
+          <div class="workbench-lead-actions">
+            ${phoneHref ? `<a href="${escapeHtml(phoneHref)}" aria-label="拨打 ${escapeHtml(phone)}">${escapeHtml(phone)}</a>` : ""}
+            <button class="secondary" type="button" data-workbench-lead="${Number(lead.id) || 0}">查看/跟进</button>
+          </div>
+        </article>
+      `;
+    }).join("")
+    : `<div class="empty-state">当前没有紧急销售任务。可以从线索数据库挑选高潜企业开始跟进。</div>`;
+
+  const statuses = state.dashboard.statuses || {};
+  const pipelineKeys = ["new", "contacted", "qualified", "quoted", "won"];
+  const pipelineMax = Math.max(1, ...pipelineKeys.map((key) => Number(statuses[key] || 0)));
+  $("#workbench-pipeline").innerHTML = pipelineKeys.map((key) => {
+    const count = Number(statuses[key] || 0);
+    return `
+      <button type="button" data-workbench-status="${escapeHtml(key)}">
+        <span>${escapeHtml(SALES_STATUS_LABELS[key])}</span>
+        <i><b style="width:${Math.max(4, Math.round((count / pipelineMax) * 100))}%"></b></i>
+        <strong>${count.toLocaleString("zh-CN")}</strong>
+      </button>
+    `;
+  }).join("");
+
+  const total = Number(state.dashboard.total || state.savedLeads.length || 0);
+  const contactable = state.savedLeads.filter((lead) => lead.phone || lead.email).length;
+  const managed = state.profiles.length;
+  $("#workbench-data-health").innerHTML = [
+    ["已有联系方式", contactable, total],
+    ["已进入公司档案", managed, total],
+    ["待补联系方式", Number(workspace.needsContact || 0), total],
+    ["未分配负责人", Number(workspace.unassigned || 0), total],
+  ].map(([label, value, denominator]) => {
+    const percent = denominator ? Math.round((Number(value) / denominator) * 100) : 0;
+    return `
+      <div>
+        <span><strong>${escapeHtml(label)}</strong><em>${Number(value).toLocaleString("zh-CN")}</em></span>
+        <i><b style="width:${Math.max(0, Math.min(100, percent))}%"></b></i>
+      </div>
+    `;
+  }).join("");
+}
+
+async function loadSalesWorkbench(force = false) {
+  await loadLeadStore(force);
+  renderSalesWorkbench();
+}
+
+async function openDatabaseQueue({ queue = "", status = "" } = {}) {
+  await switchView("database");
+  $("#status-filter").value = status;
+  $("#direction-filter").value = "";
+  $("#work-queue-filter").value = queue;
+  $("#filter").value = "";
+  resetCurrentPage();
   renderLeads();
 }
 
@@ -1021,7 +1253,21 @@ async function saveProfile(event) {
 
 function formatDateTime(value) {
   if (!value) return "尚未运行";
-  return String(value).replace("T", " ").slice(0, 16);
+  const text = String(value);
+  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(text)) {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+      return new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(parsed).replaceAll("/", "-");
+    }
+  }
+  return text.replace("T", " ").slice(0, 16);
 }
 
 function monitorDirection(monitor) {
@@ -1172,31 +1418,35 @@ async function loadSystem() {
 }
 
 async function switchView(view) {
-  state.view = ["database", "profiles", "alerts", "system"].includes(view) ? view : "collect";
+  state.view = ["workbench", "database", "profiles", "alerts", "system"].includes(view) ? view : "collect";
   $$(".workspace-tabs button").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.view);
   });
+  const workbench = state.view === "workbench";
   const alerts = state.view === "alerts";
   const database = state.view === "database";
   const profiles = state.view === "profiles";
   const system = state.view === "system";
+  $("#sales-workbench-panel").hidden = !workbench;
   $("#alerts-panel").hidden = !alerts;
   $("#profiles-panel").hidden = !profiles;
   $("#system-panel").hidden = !system;
-  $(".table-shell").hidden = alerts || profiles || system;
-  $(".filters").hidden = alerts || system;
+  $(".table-shell").hidden = workbench || alerts || profiles || system;
+  $(".filters").hidden = workbench || alerts || system;
   $("#notice").hidden = alerts || system;
-  $("#quality-summary").hidden = alerts || system;
-  $("#pagination").hidden = alerts || system || state.view === "collect";
+  $("#quality-summary").hidden = workbench || alerts || system;
+  $("#pagination").hidden = workbench || alerts || system || state.view === "collect";
   $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
-  $("#progress-panel").hidden = alerts || system || !state.activeJobId;
-  $("#quick-filters").hidden = database || profiles;
+  $("#progress-panel").hidden = workbench || alerts || system || !state.activeJobId;
+  $("#quick-filters").hidden = workbench || database || profiles;
   $("#crm-filters").hidden = !(database || profiles);
   $("#select-all-leads").hidden = !database;
   $("#save-monitor-button").hidden = state.view !== "collect";
   $("#task-button").hidden = state.view !== "collect" || ["procurement", "environmental", "competitor"].includes(state.direction);
-  $("#export-button").hidden = alerts || system;
-  $("#result-title").textContent = database
+  $("#export-button").hidden = workbench || alerts || system;
+  $("#result-title").textContent = workbench
+    ? "今日销售工作台"
+    : database
     ? "销售线索数据库"
     : profiles
       ? "公司档案"
@@ -1214,12 +1464,15 @@ async function switchView(view) {
             ? "招投标/采购信息监控"
             : "潜在买家列表";
   $("#filter").placeholder = database || profiles ? "搜索公司、负责人、备注、电话" : "输入公司、行业、地区、用途";
-  if (database) await loadSavedLeads();
+  if (workbench) await loadSalesWorkbench();
+  else if (database) await loadSavedLeads();
   else if (profiles) await loadProfiles();
   else if (alerts) await loadAlerts();
   else if (system) await loadSystem();
   else renderLeads();
-  if (database) {
+  if (workbench) {
+    setNotice("优先队列会随跟进时间、销售状态和线索质量自动更新。");
+  } else if (database) {
     setNotice("数据库会自动合并重复企业，并保留销售状态、负责人、备注和跟进计划。");
   } else if (profiles) {
     setNotice("公司档案用于沉淀已跟进企业、手动新增客户和液钙供需参数。");
@@ -1796,8 +2049,9 @@ function applySearchResult(data) {
 
 function detailItem(label, value, isLink = false) {
   if (!value) return "";
-  const content = isLink
-    ? `<a href="${escapeHtml(value)}" target="_blank" rel="noreferrer">${escapeHtml(value)}</a>`
+  const safeHref = isLink ? safeExternalUrl(value) : "";
+  const content = safeHref
+    ? `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noreferrer">${escapeHtml(value)}</a>`
     : escapeHtml(value);
   return `<div><dt>${escapeHtml(label)}</dt><dd>${content}</dd></div>`;
 }
@@ -1823,6 +2077,35 @@ function detailScoreItem(lead) {
   return detailItem("智能评分", `${lead.score || 0} 分${scoreDetails ? `（${scoreDetails}）` : ""}`);
 }
 
+function renderLeadActivity(lead) {
+  const panel = $("#lead-activity-panel");
+  const list = $("#lead-activity-list");
+  const history = Array.isArray(lead.activity_history) ? lead.activity_history : [];
+  panel.hidden = !lead.id;
+  if (!lead.id) {
+    list.innerHTML = "";
+    return;
+  }
+  list.innerHTML = history.length
+    ? history.map((item) => {
+      const details = [
+        item.details?.owner ? `负责人：${item.details.owner}` : "",
+        item.details?.nextFollowUp ? `下次跟进：${formatDateTime(item.details.nextFollowUp)}` : "",
+      ].filter(Boolean).join(" · ");
+      return `
+        <div class="lead-activity-row">
+          <i aria-hidden="true"></i>
+          <div>
+            <strong>${escapeHtml(item.summary || "更新公司档案")}</strong>
+            ${details ? `<p>${escapeHtml(details)}</p>` : ""}
+            <time>${escapeHtml(formatDateTime(item.createdAt))}</time>
+          </div>
+        </div>
+      `;
+    }).join("")
+    : `<div class="empty-state compact">尚无跟进记录，保存一次销售状态后会自动出现在这里。</div>`;
+}
+
 function showCompanyDetail(lead) {
   state.currentLead = lead;
   const procurement = lead.direction === "procurement";
@@ -1830,6 +2113,10 @@ function showCompanyDetail(lead) {
   const competitor = lead.direction === "competitor";
   const social = lead.direction === "social";
   const companyWebsiteNotice = lead.source?.includes("企业官网");
+  const searchHref = safeExternalUrl(lead.search_url);
+  const companyWebsiteHref = safeExternalUrl(lead.company_website);
+  const qccHref = safeExternalUrl(lead.qcc_url);
+  const websiteHref = safeExternalUrl(lead.website);
   $("#detail-company").textContent = lead.company || (procurement ? "采购单位详情" : "企业详情");
   $("#detail-grid").innerHTML = [
     detailScoreItem(lead),
@@ -1903,11 +2190,12 @@ function showCompanyDetail(lead) {
     lead.company ? `<button type="button" data-copy-company="${escapeHtml(lead.company)}">复制公司名</button>` : "",
     lead.phone ? `<button type="button" data-copy-phone="${escapeHtml(lead.phone)}">复制电话</button>` : "",
     competitor ? `<button type="button" data-reverse-current="1">反向开发同类客户</button>` : "",
-    lead.search_url ? `<a href="${escapeHtml(lead.search_url)}" target="_blank" rel="noreferrer">${social ? "打开社媒原内容" : competitor ? "来源检索" : procurement ? (companyWebsiteNotice ? "官网公告" : "公告正文") : environmental ? "环保证据原文" : "地图查看"}</a>` : "",
-    lead.company_website && (companyWebsiteNotice || competitor) ? `<a href="${escapeHtml(lead.company_website)}" target="_blank" rel="noreferrer">企业官网</a>` : "",
-    lead.qcc_url ? `<a href="${escapeHtml(lead.qcc_url)}" target="_blank" rel="noreferrer">工商信息核验</a>` : "",
-    lead.website && lead.website !== lead.search_url ? `<a href="${escapeHtml(lead.website)}" target="_blank" rel="noreferrer">${procurement ? "公告页面" : "网页搜索"}</a>` : "",
+    searchHref ? `<a href="${escapeHtml(searchHref)}" target="_blank" rel="noreferrer">${social ? "打开社媒原内容" : competitor ? "来源检索" : procurement ? (companyWebsiteNotice ? "官网公告" : "公告正文") : environmental ? "环保证据原文" : "地图查看"}</a>` : "",
+    companyWebsiteHref && (companyWebsiteNotice || competitor) ? `<a href="${escapeHtml(companyWebsiteHref)}" target="_blank" rel="noreferrer">企业官网</a>` : "",
+    qccHref ? `<a href="${escapeHtml(qccHref)}" target="_blank" rel="noreferrer">工商信息核验</a>` : "",
+    websiteHref && websiteHref !== searchHref ? `<a href="${escapeHtml(websiteHref)}" target="_blank" rel="noreferrer">${procurement ? "公告页面" : "网页搜索"}</a>` : "",
   ].join("");
+  renderLeadActivity(lead);
   const socialReview = $("#social-review-panel");
   socialReview.hidden = !social || !lead.id;
   if (social && lead.id) {
@@ -1932,7 +2220,7 @@ function showCompanyDetail(lead) {
     $("#sales-status").value = lead.sales_status || "new";
     $("#sales-owner").value = lead.owner || "";
     $("#opportunity-role").value = lead.opportunity_role || "";
-    $("#sales-follow-up").value = (lead.next_follow_up || "").slice(0, 16);
+    $("#sales-follow-up").value = datetimeLocalValue(lead.next_follow_up);
     $("#sales-notes").value = lead.notes || "";
     $("#liquid-concentration").value = lead.liquid_concentration || "";
     $("#monthly-volume").value = lead.monthly_volume || "";
@@ -1942,6 +2230,22 @@ function showCompanyDetail(lead) {
     $("#commercial-value").value = lead.commercial_value || "";
   }
   showDialogSmooth($("#company-dialog"));
+}
+
+async function openLeadDetail(lead) {
+  if (!lead) return;
+  if (!lead.id) {
+    showCompanyDetail(lead);
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/leads/detail?id=${encodeURIComponent(lead.id)}`);
+    replaceLeadEverywhere(data.lead);
+    showCompanyDetail(data.lead);
+  } catch (error) {
+    showCompanyDetail(lead);
+    setNotice(error.message || "最新公司档案读取失败，已显示缓存资料。", true);
+  }
 }
 
 function replaceLeadEverywhere(updated) {
@@ -2039,7 +2343,7 @@ async function saveSalesRecord(event) {
   const button = $("#sales-form button[type='submit']");
   button.disabled = true;
   try {
-    await fetchJson("/api/leads/update", {
+    const data = await fetchJson("/api/leads/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2057,11 +2361,12 @@ async function saveSalesRecord(event) {
         commercialValue: $("#commercial-value").value,
       }),
     });
+    if (data.lead) replaceLeadEverywhere(data.lead);
     await closeDialogSmooth($("#company-dialog"));
-    await Promise.all([
-      state.view === "profiles" ? loadProfiles(true) : loadSavedLeads(true),
-      loadDashboard(),
-    ]);
+    await loadDashboard();
+    if (state.view === "workbench") await loadSalesWorkbench(true);
+    else if (state.view === "profiles") await loadProfiles(true);
+    else await loadSavedLeads(true);
     setNotice("跟进记录已保存。");
   } catch (error) {
     setNotice(error.message || "保存失败", true);
@@ -2347,6 +2652,31 @@ function bindEvents() {
   $$(".workspace-tabs button").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
+  $("#workbench-summary").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-workbench-queue]");
+    if (!button) return;
+    openDatabaseQueue({ queue: button.dataset.workbenchQueue })
+      .catch((error) => setNotice(error.message || "销售队列加载失败", true));
+  });
+  $("#workbench-pipeline").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-workbench-status]");
+    if (!button) return;
+    openDatabaseQueue({ status: button.dataset.workbenchStatus })
+      .catch((error) => setNotice(error.message || "销售阶段加载失败", true));
+  });
+  $("#workbench-priority-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-workbench-lead]");
+    if (!button) return;
+    const lead = state.savedLeads.find(
+      (item) => Number(item.id) === Number(button.dataset.workbenchLead),
+    );
+    openLeadDetail(lead)
+      .catch((error) => setNotice(error.message || "公司详情加载失败", true));
+  });
+  $("#workbench-next-button").addEventListener("click", () => {
+    openLeadDetail(state.workbenchPriority[0])
+      .catch((error) => setNotice(error.message || "公司详情加载失败", true));
+  });
   $$("input[name='collectionStrategy']").forEach((input) => {
     input.addEventListener("change", () => applyCollectionStrategy(input.value));
   });
@@ -2369,7 +2699,8 @@ function bindEvents() {
     }
     const button = event.target.closest("[data-detail-index]");
     if (!button) return;
-    showCompanyDetail(state.filtered[Number(button.dataset.detailIndex)]);
+    openLeadDetail(state.filtered[Number(button.dataset.detailIndex)])
+      .catch((error) => setNotice(error.message || "公司详情加载失败", true));
   });
   $("#detail-close").addEventListener("click", () => closeDialogSmooth($("#company-dialog")));
   $("#detail-actions").addEventListener("click", (event) => {
@@ -2408,7 +2739,8 @@ function bindEvents() {
   $("#profile-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-profile-detail-index]");
     if (!button) return;
-    showCompanyDetail(state.profileFiltered[Number(button.dataset.profileDetailIndex)]);
+    openLeadDetail(state.profileFiltered[Number(button.dataset.profileDetailIndex)])
+      .catch((error) => setNotice(error.message || "公司详情加载失败", true));
   });
   $("#profile-status-board").addEventListener("click", (event) => {
     const button = event.target.closest("[data-profile-status]");
