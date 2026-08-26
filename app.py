@@ -186,18 +186,27 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v11.0-sales-workbench"
+APP_VERSION = "liquid-calcium-ops-v12.0-province-directory"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
     "downstream": "下游买家",
+    "directory": "省级行业企业名录",
     "upstream": "上游液钙副产企业",
     "procurement": "招投标/采购",
     "environmental": "含氟废水企业",
     "competitor": "竞品/同行情报",
     "social": "社媒线索雷达",
 }
-DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor", "social"]
+DIRECTION_ORDER = [
+    "downstream",
+    "directory",
+    "upstream",
+    "procurement",
+    "environmental",
+    "competitor",
+    "social",
+]
 DIRECTION_SET = set(DIRECTION_ORDER)
 
 SOCIAL_PLATFORM_LIBRARY: dict[str, dict[str, Any]] = {
@@ -885,6 +894,152 @@ REGION_PRESETS: dict[str, list[str]] = {
     "south": ["广东", "广西", "海南"],
     "southwest": ["重庆", "四川", "贵州", "云南", "西藏"],
     "northwest": ["陕西", "甘肃", "青海", "宁夏", "新疆"],
+}
+
+
+DIRECTORY_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
+    "wastewater": {
+        "name": "污水处理厂/水质净化厂",
+        "keywords": [
+            "污水处理厂",
+            "污水处理有限公司",
+            "水质净化厂",
+            "污水净化中心",
+            "再生水厂",
+            "水务运营有限公司",
+        ],
+        "match_terms": [
+            "污水处理厂",
+            "污水处理",
+            "污水处理有限公司",
+            "污水处理中心",
+            "污水厂",
+            "污水净化",
+            "水质净化",
+            "再生水厂",
+            "污水运营",
+            "水务运营",
+        ],
+        "exclude_terms": ["设备", "药剂", "培训", "设计院", "研究院", "工程设计", "技术服务", "销售", "项目部", "施工", "建工"],
+        "uses": "市政污水、城镇污水和再生水处理运营单位",
+        "pitch": "核实处理规模、提标改造计划、药剂使用工段、年度用量和采购方式。",
+        "score": 54,
+    },
+    "industrial_wastewater": {
+        "name": "工业园区污水处理厂",
+        "keywords": [
+            "工业污水处理厂",
+            "园区污水处理厂",
+            "开发区污水处理厂",
+            "工业园水处理有限公司",
+            "园区水质净化厂",
+        ],
+        "match_terms": [
+            "工业污水",
+            "园区污水",
+            "开发区污水",
+            "工业园水处理",
+            "园区水质净化",
+        ],
+        "exclude_terms": ["设备", "药剂", "培训", "设计院", "项目部", "施工", "建工"],
+        "uses": "工业园、化工园和开发区集中式污水处理设施",
+        "pitch": "核实园区行业构成、进出水指标、除氟/除磷工段、药剂需求和采购主体。",
+        "score": 58,
+    },
+    "water_supply": {
+        "name": "自来水厂/供水公司",
+        "keywords": ["自来水厂", "自来水有限公司", "供水有限公司", "水务集团", "城乡供水"],
+        "match_terms": ["自来水厂", "自来水有限公司", "供水有限公司", "水务集团", "城乡供水"],
+        "exclude_terms": ["设备", "安装", "维修", "门市"],
+        "uses": "城市、县域和乡镇供水运营单位",
+        "pitch": "核实净水工艺、消毒和水处理药剂目录、年度招采计划及供应商准入。",
+        "score": 48,
+    },
+    "hazardous_waste": {
+        "name": "危废/固废处置企业",
+        "keywords": ["危险废物处置", "危废处置公司", "固体废物处置", "工业固废处理", "资源循环利用"],
+        "match_terms": ["危险废物", "危废处置", "固体废物", "工业固废", "资源循环利用"],
+        "exclude_terms": ["咨询", "检测", "培训"],
+        "uses": "危险废物、工业固废和资源化利用企业",
+        "pitch": "核实许可类别、处置工艺、含盐废液或副产物来源，以及综合利用合作空间。",
+        "score": 52,
+    },
+    "waste_incineration": {
+        "name": "垃圾焚烧/飞灰处置企业",
+        "keywords": ["垃圾焚烧发电厂", "生活垃圾焚烧", "垃圾处理厂", "飞灰处置", "飞灰资源化"],
+        "match_terms": ["垃圾焚烧", "垃圾处理厂", "飞灰处置", "飞灰资源化"],
+        "exclude_terms": ["设备", "设计", "咨询"],
+        "uses": "生活垃圾焚烧、飞灰水洗和资源化处置企业",
+        "pitch": "核实飞灰水洗、盐分处置、石灰或盐酸工段，以及副产液钙产生量。",
+        "score": 54,
+    },
+    "environmental_service": {
+        "name": "环保工程/水处理服务企业",
+        "keywords": ["水处理工程公司", "污水运营公司", "环境治理公司", "环保工程有限公司", "水环境治理"],
+        "match_terms": ["水处理工程", "污水运营", "环境治理", "环保工程", "水环境治理"],
+        "exclude_terms": ["培训", "检测中心", "研究院"],
+        "uses": "环保工程、污水运营和水环境治理服务商",
+        "pitch": "核实在建项目、药剂选型权、客户行业、项目地区和供应商合作模式。",
+        "score": 44,
+    },
+    "chemical": {
+        "name": "化工/新材料生产企业",
+        "keywords": ["化工有限公司", "化学有限公司", "化工厂", "新材料有限公司", "精细化工"],
+        "match_terms": ["化工有限公司", "化学有限公司", "化工厂", "新材料有限公司", "精细化工"],
+        "exclude_terms": ["贸易", "销售", "商贸", "门市", "物流"],
+        "uses": "化工、精细化工和新材料生产企业",
+        "pitch": "核实盐酸、石灰中和、含氟废水、含盐废水和液体氯化钙供需场景。",
+        "score": 42,
+    },
+    "pharmaceutical": {
+        "name": "制药/医药生产企业",
+        "keywords": ["制药有限公司", "药业有限公司", "原料药厂", "生物制药", "医药产业园"],
+        "match_terms": ["制药有限公司", "药业有限公司", "原料药", "生物制药", "医药产业园"],
+        "exclude_terms": ["药房", "药店", "门诊", "医院", "医疗器械销售"],
+        "uses": "制药、原料药和生物医药生产企业",
+        "pitch": "核实废水中和、含盐母液、环保处理工艺、药剂采购和副产液钙情况。",
+        "score": 42,
+    },
+}
+
+
+# Static prefecture-level coverage keeps province scans deterministic and avoids
+# depending on a fourth external API merely to discover city names.
+PROVINCE_CITY_MAP: dict[str, list[str]] = {
+    "北京": ["北京市"],
+    "天津": ["天津市"],
+    "河北": ["石家庄市", "唐山市", "秦皇岛市", "邯郸市", "邢台市", "保定市", "张家口市", "承德市", "沧州市", "廊坊市", "衡水市"],
+    "山西": ["太原市", "大同市", "阳泉市", "长治市", "晋城市", "朔州市", "晋中市", "运城市", "忻州市", "临汾市", "吕梁市"],
+    "内蒙古": ["呼和浩特市", "包头市", "乌海市", "赤峰市", "通辽市", "鄂尔多斯市", "呼伦贝尔市", "巴彦淖尔市", "乌兰察布市", "兴安盟", "锡林郭勒盟", "阿拉善盟"],
+    "辽宁": ["沈阳市", "大连市", "鞍山市", "抚顺市", "本溪市", "丹东市", "锦州市", "营口市", "阜新市", "辽阳市", "盘锦市", "铁岭市", "朝阳市", "葫芦岛市"],
+    "吉林": ["长春市", "吉林市", "四平市", "辽源市", "通化市", "白山市", "松原市", "白城市", "延边朝鲜族自治州"],
+    "黑龙江": ["哈尔滨市", "齐齐哈尔市", "鸡西市", "鹤岗市", "双鸭山市", "大庆市", "伊春市", "佳木斯市", "七台河市", "牡丹江市", "黑河市", "绥化市", "大兴安岭地区"],
+    "上海": ["上海市"],
+    "江苏": ["南京市", "无锡市", "徐州市", "常州市", "苏州市", "南通市", "连云港市", "淮安市", "盐城市", "扬州市", "镇江市", "泰州市", "宿迁市"],
+    "浙江": ["杭州市", "宁波市", "温州市", "嘉兴市", "湖州市", "绍兴市", "金华市", "衢州市", "舟山市", "台州市", "丽水市"],
+    "安徽": ["合肥市", "芜湖市", "蚌埠市", "淮南市", "马鞍山市", "淮北市", "铜陵市", "安庆市", "黄山市", "滁州市", "阜阳市", "宿州市", "六安市", "亳州市", "池州市", "宣城市"],
+    "福建": ["福州市", "厦门市", "莆田市", "三明市", "泉州市", "漳州市", "南平市", "龙岩市", "宁德市"],
+    "江西": ["南昌市", "景德镇市", "萍乡市", "九江市", "新余市", "鹰潭市", "赣州市", "吉安市", "宜春市", "抚州市", "上饶市"],
+    "山东": ["济南市", "青岛市", "淄博市", "枣庄市", "东营市", "烟台市", "潍坊市", "济宁市", "泰安市", "威海市", "日照市", "临沂市", "德州市", "聊城市", "滨州市", "菏泽市"],
+    "河南": ["郑州市", "开封市", "洛阳市", "平顶山市", "安阳市", "鹤壁市", "新乡市", "焦作市", "濮阳市", "许昌市", "漯河市", "三门峡市", "南阳市", "商丘市", "信阳市", "周口市", "驻马店市", "济源市"],
+    "湖北": ["武汉市", "黄石市", "十堰市", "宜昌市", "襄阳市", "鄂州市", "荆门市", "孝感市", "荆州市", "黄冈市", "咸宁市", "随州市", "恩施土家族苗族自治州", "仙桃市", "潜江市", "天门市", "神农架林区"],
+    "湖南": ["长沙市", "株洲市", "湘潭市", "衡阳市", "邵阳市", "岳阳市", "常德市", "张家界市", "益阳市", "郴州市", "永州市", "怀化市", "娄底市", "湘西土家族苗族自治州"],
+    "广东": ["广州市", "韶关市", "深圳市", "珠海市", "汕头市", "佛山市", "江门市", "湛江市", "茂名市", "肇庆市", "惠州市", "梅州市", "汕尾市", "河源市", "阳江市", "清远市", "东莞市", "中山市", "潮州市", "揭阳市", "云浮市"],
+    "广西": ["南宁市", "柳州市", "桂林市", "梧州市", "北海市", "防城港市", "钦州市", "贵港市", "玉林市", "百色市", "贺州市", "河池市", "来宾市", "崇左市"],
+    "海南": ["海口市", "三亚市", "三沙市", "儋州市", "五指山市", "琼海市", "文昌市", "万宁市", "东方市", "定安县", "屯昌县", "澄迈县", "临高县", "白沙黎族自治县", "昌江黎族自治县", "乐东黎族自治县", "陵水黎族自治县", "保亭黎族苗族自治县", "琼中黎族苗族自治县"],
+    "重庆": ["重庆市"],
+    "四川": ["成都市", "自贡市", "攀枝花市", "泸州市", "德阳市", "绵阳市", "广元市", "遂宁市", "内江市", "乐山市", "南充市", "眉山市", "宜宾市", "广安市", "达州市", "雅安市", "巴中市", "资阳市", "阿坝藏族羌族自治州", "甘孜藏族自治州", "凉山彝族自治州"],
+    "贵州": ["贵阳市", "六盘水市", "遵义市", "安顺市", "毕节市", "铜仁市", "黔西南布依族苗族自治州", "黔东南苗族侗族自治州", "黔南布依族苗族自治州"],
+    "云南": ["昆明市", "曲靖市", "玉溪市", "保山市", "昭通市", "丽江市", "普洱市", "临沧市", "楚雄彝族自治州", "红河哈尼族彝族自治州", "文山壮族苗族自治州", "西双版纳傣族自治州", "大理白族自治州", "德宏傣族景颇族自治州", "怒江傈僳族自治州", "迪庆藏族自治州"],
+    "西藏": ["拉萨市", "日喀则市", "昌都市", "林芝市", "山南市", "那曲市", "阿里地区"],
+    "陕西": ["西安市", "铜川市", "宝鸡市", "咸阳市", "渭南市", "延安市", "汉中市", "榆林市", "安康市", "商洛市"],
+    "甘肃": ["兰州市", "嘉峪关市", "金昌市", "白银市", "天水市", "武威市", "张掖市", "平凉市", "酒泉市", "庆阳市", "定西市", "陇南市", "临夏回族自治州", "甘南藏族自治州"],
+    "青海": ["西宁市", "海东市", "海北藏族自治州", "黄南藏族自治州", "海南藏族自治州", "果洛藏族自治州", "玉树藏族自治州", "海西蒙古族藏族自治州"],
+    "宁夏": ["银川市", "石嘴山市", "吴忠市", "固原市", "中卫市"],
+    "新疆": ["乌鲁木齐市", "克拉玛依市", "吐鲁番市", "哈密市", "昌吉回族自治州", "博尔塔拉蒙古自治州", "巴音郭楞蒙古自治州", "阿克苏地区", "克孜勒苏柯尔克孜自治州", "喀什地区", "和田地区", "伊犁哈萨克自治州", "塔城地区", "阿勒泰地区", "石河子市", "阿拉尔市", "图木舒克市", "五家渠市", "北屯市", "铁门关市", "双河市", "可克达拉市", "昆玉市", "胡杨河市", "新星市", "白杨市"],
+    "台湾": ["台北市", "新北市", "桃园市", "台中市", "台南市", "高雄市", "基隆市", "新竹市", "嘉义市", "新竹县", "苗栗县", "彰化县", "南投县", "云林县", "嘉义县", "屏东县", "宜兰县", "花莲县", "台东县", "澎湖县", "金门县", "连江县"],
+    "香港": ["香港特别行政区"],
+    "澳门": ["澳门特别行政区"],
 }
 
 
@@ -1666,6 +1821,7 @@ def lead_quality_profile(lead: dict[str, Any]) -> dict[str, Any]:
         word in evidence_text for word in ("官网行业推断", "官网工艺推断", "仅为行业推断", "待核验")
     )
     direct_terms = {
+        "directory": ("污水处理", "水质净化", "水务", "危废", "固废", "垃圾焚烧", "环保工程", "化工", "制药"),
         "upstream": ("液体氯化钙", "液钙", "副产", "石灰中和", "蒸氨母液", "氯醇法"),
         "environmental": ("含氟废水", "废水氟化物", "氟离子", "氟化物（以f-计）", "明确确认"),
         "procurement": ("采购", "招标", "询价", "中标", "成交", "液体氯化钙", "氯化钙"),
@@ -2868,6 +3024,8 @@ def normalize_regions(input_regions: list[str] | str | None) -> list[str]:
 
 
 def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
+    if direction == "directory":
+        return DIRECTORY_SECTOR_LIBRARY
     if direction == "social":
         return SOCIAL_SECTOR_LIBRARY
     if direction == "competitor":
@@ -2884,7 +3042,9 @@ def get_sector_library(direction: str) -> dict[str, dict[str, Any]]:
 def selected_sectors(ids: list[str] | None, direction: str) -> dict[str, dict[str, Any]]:
     library = get_sector_library(direction)
     if not ids:
-        if direction == "social":
+        if direction == "directory":
+            ids = ["wastewater"]
+        elif direction == "social":
             ids = ["liquid_calcium", "byproduct", "fluoride", "downstream", "industry_process"]
         elif direction == "competitor":
             ids = ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"]
@@ -3027,6 +3187,94 @@ def amap_region_matches(
         for value in (province_value, city_value, district_value)
         if requested and value
     )
+
+
+def directory_province_name(value: Any) -> str:
+    normalized = normalized_region_text(value)
+    for province in PROVINCE_CITY_MAP:
+        if normalized == normalized_region_text(province):
+            return province
+    return ""
+
+
+def directory_scan_regions(province: str) -> list[str]:
+    canonical = directory_province_name(province)
+    if not canonical:
+        return []
+    cities = PROVINCE_CITY_MAP[canonical]
+    if len(cities) == 1 and normalized_region_text(cities[0]) == canonical:
+        return cities.copy()
+    province_label = {
+        "内蒙古": "内蒙古自治区",
+        "广西": "广西壮族自治区",
+        "西藏": "西藏自治区",
+        "宁夏": "宁夏回族自治区",
+        "新疆": "新疆维吾尔自治区",
+    }.get(canonical, f"{canonical}省")
+    return [f"{province_label}{city}" for city in cities]
+
+
+def directory_match_quality(
+    name: str,
+    raw_type: str,
+    sector: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    text = f"{name} {raw_type}"
+    if any(word in text for word in sector.get("exclude_terms", [])):
+        return False, []
+    hits = [word for word in sector.get("match_terms", sector.get("keywords", [])) if word in text]
+    if not hits:
+        return False, []
+    entity_markers = ("厂", "公司", "集团", "中心", "水务", "园区", "处理站")
+    return any(marker in name for marker in entity_markers), hits
+
+
+def directory_lead_score(
+    name: str,
+    raw_type: str,
+    sector: dict[str, Any],
+    has_phone: bool,
+) -> tuple[int, str]:
+    matched, hits = directory_match_quality(name, raw_type, sector)
+    score = int(sector.get("score") or 42)
+    if matched:
+        score += min(20, len(hits) * 7)
+    if has_phone:
+        score += 10
+    if any(marker in name for marker in ("有限公司", "集团", "处理厂", "净化厂")):
+        score += 6
+    reason = "、".join(hits) if hits else "行业名录关键词匹配"
+    return min(score, 92), reason
+
+
+def directory_city_stats(
+    leads: list[Lead],
+    province: str,
+) -> list[dict[str, Any]]:
+    cities = PROVINCE_CITY_MAP.get(province, [])
+    stats = {
+        city: {"city": city, "count": 0, "phoneCount": 0, "contactCount": 0}
+        for city in cities
+    }
+    unmatched = {"city": "地区待细分", "count": 0, "phoneCount": 0, "contactCount": 0}
+    for lead in leads:
+        region = normalized_region_text(lead.region)
+        city = next(
+            (
+                item
+                for item in sorted(cities, key=len, reverse=True)
+                if normalized_region_text(item) in region
+            ),
+            "",
+        )
+        bucket = stats[city] if city else unmatched
+        bucket["count"] += 1
+        bucket["phoneCount"] += int(bool(lead.phone))
+        bucket["contactCount"] += int(bool(lead.phone or lead.email))
+    ordered = list(stats.values())
+    if unmatched["count"]:
+        ordered.append(unmatched)
+    return ordered
 
 
 def amap_search(
@@ -3760,6 +4008,10 @@ def collect_amap_leads(
                 raw_type = as_text(poi.get("type"))
                 if direction == "downstream" and precision_mode and not likely_downstream_company(name, raw_type):
                     continue
+                if direction == "directory":
+                    directory_match, _ = directory_match_quality(name, raw_type, sector)
+                    if not directory_match:
+                        continue
                 if direction == "upstream":
                     upstream_text = f"{name} {raw_type}"
                     if exclude_suppliers and any(word in upstream_text for word in UPSTREAM_SUPPLIER_WORDS):
@@ -3786,6 +4038,14 @@ def collect_amap_leads(
                         sector,
                         bool(phone),
                     )
+                elif direction == "directory":
+                    score, reason = directory_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                    confidence = "地图公开名录"
                 else:
                     score, reason = lead_score(name, raw_type, int(sector["score"]), bool(phone))
                     confidence = ""
@@ -3805,6 +4065,8 @@ def collect_amap_leads(
                         match_reason=(
                             f"{keyword}；工艺线索：{reason}"
                             if direction == "upstream"
+                            else f"{keyword}；省级逐城名录匹配：{reason}"
+                            if direction == "directory"
                             else f"{keyword}；{reason}"
                         ),
                         search_url=links["amap"],
@@ -3921,6 +4183,10 @@ def collect_baidu_map_leads(
                     name, raw_type
                 ):
                     continue
+                if direction == "directory":
+                    directory_match, _ = directory_match_quality(name, raw_type, sector)
+                    if not directory_match:
+                        continue
                 if direction == "upstream":
                     upstream_text = f"{name} {raw_type}"
                     if exclude_suppliers and any(
@@ -3952,6 +4218,14 @@ def collect_baidu_map_leads(
                         sector,
                         bool(phone),
                     )
+                elif direction == "directory":
+                    score, reason = directory_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                    confidence = "地图公开名录"
                 else:
                     score, reason = lead_score(
                         name,
@@ -3976,6 +4250,8 @@ def collect_baidu_map_leads(
                         match_reason=(
                             f"{keyword}；工艺线索：{reason}"
                             if direction == "upstream"
+                            else f"{keyword}；省级逐城名录匹配：{reason}"
+                            if direction == "directory"
                             else f"{keyword}；{reason}"
                         ),
                         search_url=as_text(detail_info.get("detail_url"))
@@ -4083,6 +4359,10 @@ def collect_tianditu_leads(
                     name, raw_type
                 ):
                     continue
+                if direction == "directory":
+                    directory_match, _ = directory_match_quality(name, raw_type, sector)
+                    if not directory_match:
+                        continue
                 if direction == "upstream":
                     upstream_text = f"{name} {raw_type}"
                     if exclude_suppliers and any(
@@ -4108,6 +4388,14 @@ def collect_tianditu_leads(
                         sector,
                         bool(phone),
                     )
+                elif direction == "directory":
+                    score, reason = directory_lead_score(
+                        name,
+                        raw_type,
+                        sector,
+                        bool(phone),
+                    )
+                    confidence = "地图公开名录"
                 else:
                     score, reason = lead_score(
                         name,
@@ -4132,6 +4420,8 @@ def collect_tianditu_leads(
                         match_reason=(
                             f"{keyword}；工艺线索：{reason}"
                             if direction == "upstream"
+                            else f"{keyword}；省级逐城名录匹配：{reason}"
+                            if direction == "directory"
                             else f"{keyword}；{reason}"
                         ),
                         search_url=links["tianditu"],
@@ -4173,6 +4463,9 @@ def merge_map_leads(*groups: list[Lead]) -> list[Lead]:
         existing.phone = merge_contact_values(existing.phone, lead.phone)
         existing.email = merge_contact_values(existing.email, lead.email)
         existing.poi_id = merge_contact_values(existing.poi_id, lead.poi_id)
+        if existing.direction == "directory":
+            existing.sector = merge_contact_values(existing.sector, lead.sector)
+            existing.use_case = merge_contact_values(existing.use_case, lead.use_case)
         existing.evidence_count = max(2, existing.evidence_count + 1)
         existing.score = min(100, max(existing.score, lead.score) + 4)
         for field in (
@@ -8110,12 +8403,19 @@ def collect_social_leads(
 
 def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
     requested_direction = str(payload.get("direction") or "")
-    direction = (
-        requested_direction
-        if requested_direction in {"upstream", "procurement", "environmental", "competitor", "social"}
-        else "downstream"
-    )
-    regions = normalize_regions(payload.get("regions"))
+    direction = requested_direction if requested_direction in DIRECTION_SET else "downstream"
+    directory_province = ""
+    if direction == "directory":
+        raw_regions = payload.get("regions") or []
+        first_region = raw_regions[0] if isinstance(raw_regions, list) and raw_regions else raw_regions
+        directory_province = directory_province_name(
+            payload.get("directoryProvince") or first_region
+        )
+        if not directory_province:
+            raise ValueError("请选择一个有效省份后再开始省级行业普查")
+        regions = directory_scan_regions(directory_province)
+    else:
+        regions = normalize_regions(payload.get("regions"))
     sectors = selected_sectors(payload.get("sectors"), direction)
     custom_keywords = [
         item.strip()
@@ -8154,6 +8454,16 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
     exclude_suppliers = bool(payload.get("excludeSuppliers", True))
     strict_upstream = bool(payload.get("strictUpstream", True))
     collection_strategy = str(payload.get("collectionStrategy") or "balanced")
+    if direction == "directory":
+        pages = {"precision": 1, "balanced": 1, "coverage": 2}.get(
+            collection_strategy,
+            1,
+        )
+        keyword_limit = {"precision": 2, "balanced": 4, "coverage": 6}.get(
+            collection_strategy,
+            4,
+        )
+        fast_mode = collection_strategy == "precision"
     strategy_limits = {
         "precision": {
             "keyword": 6,
@@ -8707,15 +9017,27 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 errors.extend(relaxed_errors)
                 errors.append("严格工艺匹配未命中，已放宽为上游候选企业；请打开详情核验实际副产工艺。")
         if not leads:
+            if direction == "directory":
+                errors.append("省级逐城扫描已完成，但公开地图中未发现符合严格行业规则的具体企业。")
+            else:
+                leads = fallback_leads(regions, sectors, custom_keywords, direction)
+                used_fallback = True
+                errors.append("未采集到地图企业结果，已生成搜索任务清单。")
+    else:
+        if direction == "directory":
+            leads = []
+            errors.append("省级行业普查需要至少配置一个地图 API。")
+        else:
             leads = fallback_leads(regions, sectors, custom_keywords, direction)
             used_fallback = True
-            errors.append("未采集到地图企业结果，已生成搜索任务清单。")
-    else:
-        leads = fallback_leads(regions, sectors, custom_keywords, direction)
-        used_fallback = True
 
     leads = sorted(leads, key=lambda item: item.score, reverse=True)
     prepared_leads = prepare_lead_results(leads)
+    request_count = len(regions) * sum(
+        min(keyword_limit, len(item["keywords"]) + len(custom_keywords))
+        for item in sectors.values()
+    ) * max(1, min(pages, 10)) * max(1, len(map_sources))
+    city_stats = directory_city_stats(leads, directory_province) if direction == "directory" else []
     return {
         "leads": prepared_leads,
         "errors": errors[:40],
@@ -8723,10 +9045,8 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "count": len(leads),
             "companyCount": 0 if used_fallback else len(leads),
             "phoneCount": len([lead for lead in leads if lead.phone]),
-            "requestCount": len(regions) * sum(
-                min(keyword_limit, len(item["keywords"]) + len(custom_keywords))
-                for item in sectors.values()
-            ) * max(1, min(pages, 10)) * max(1, len(map_sources)),
+            "contactCount": len([lead for lead in leads if lead.phone or lead.email]),
+            "requestCount": request_count,
             "workers": max(AMAP_WORKERS, BAIDU_MAP_WORKERS, TIANDITU_WORKERS),
             "fastMode": fast_mode,
             "direction": direction,
@@ -8735,11 +9055,18 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "strictUpstream": strict_upstream,
             "collectionStrategy": collection_strategy,
             "regions": regions,
+            "province": directory_province,
+            "cityTotal": len(PROVINCE_CITY_MAP.get(directory_province, [])),
+            "citiesScanned": len(regions) if direction == "directory" else 0,
+            "citiesWithResults": len([item for item in city_stats if item["count"]]),
+            "cityStats": city_stats,
             "sectors": [item["name"] for item in sectors.values()],
             "qualitySummary": lead_quality_summary(prepared_leads),
             "mode": (
                 "task"
                 if used_fallback
+                else "directory"
+                if direction == "directory" and map_sources
                 else "maps"
                 if len(map_sources) > 1
                 else "tianditu"
@@ -9383,6 +9710,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 {
                     "sectors": SECTOR_LIBRARY,
                     "downstreamSectors": SECTOR_LIBRARY,
+                    "directorySectors": DIRECTORY_SECTOR_LIBRARY,
+                    "provinceCities": PROVINCE_CITY_MAP,
                     "upstreamSectors": UPSTREAM_SECTOR_LIBRARY,
                     "competitorSectors": COMPETITOR_SECTOR_LIBRARY,
                     "competitorSources": COMPETITOR_SOURCE_LIBRARY,

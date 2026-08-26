@@ -148,6 +148,122 @@ class LiquidCalciumAppTests(unittest.TestCase):
         )
         self.assertTrue(app.amap_region_matches("山东", "山东省", "济南市", "历下区"))
 
+    def test_directory_province_expands_to_every_anhui_city(self):
+        regions = app.directory_scan_regions("安徽省")
+
+        self.assertEqual(app.directory_province_name("安徽省"), "安徽")
+        self.assertEqual(len(regions), 16)
+        self.assertIn("安徽省合肥市", regions)
+        self.assertIn("安徽省宣城市", regions)
+        self.assertEqual(len(set(regions)), len(regions))
+        self.assertEqual(len(app.directory_scan_regions("海南")), 19)
+        self.assertIn("台湾省台北市", app.directory_scan_regions("台湾"))
+
+    def test_directory_match_keeps_operators_and_rejects_vendors(self):
+        sector = app.DIRECTORY_SECTOR_LIBRARY["wastewater"]
+
+        accepted, hits = app.directory_match_quality(
+            "合肥市十五里河污水处理厂",
+            "公司企业;公共设施",
+            sector,
+        )
+        rejected, _ = app.directory_match_quality(
+            "安徽污水处理设备有限公司",
+            "公司企业;环保设备销售",
+            sector,
+        )
+        project_office, _ = app.directory_match_quality(
+            "某建工集团污水处理厂项目部",
+            "公司企业;建设施工",
+            sector,
+        )
+
+        self.assertTrue(accepted)
+        self.assertIn("污水处理厂", hits)
+        self.assertFalse(rejected)
+        self.assertFalse(project_office)
+
+    @patch("app.collect_amap_leads")
+    def test_directory_collection_scans_cities_deduplicates_and_reports_stats(self, collect_amap):
+        collect_amap.return_value = (
+            [
+                app.Lead(
+                    company="合肥十五里河污水处理有限公司",
+                    region="安徽省 合肥市 包河区",
+                    sector="污水处理厂/水质净化厂",
+                    source="高德 POI",
+                    score=70,
+                    phone="0551-11111111",
+                    direction="directory",
+                ),
+                app.Lead(
+                    company="合肥十五里河污水处理有限责任公司",
+                    region="安徽省 合肥市 包河区",
+                    sector="污水处理厂/水质净化厂",
+                    source="高德 POI 补充",
+                    score=68,
+                    email="contact@example.com",
+                    direction="directory",
+                ),
+                app.Lead(
+                    company="芜湖市城南污水处理厂",
+                    region="安徽省 芜湖市 弋江区",
+                    sector="污水处理厂/水质净化厂",
+                    source="高德 POI",
+                    score=66,
+                    direction="directory",
+                ),
+            ],
+            [],
+        )
+
+        result = app.collect_leads(
+            {
+                "direction": "directory",
+                "directoryProvince": "安徽",
+                "sectors": ["wastewater"],
+                "collectionStrategy": "balanced",
+                "amapKey": "test-key",
+                "disableBaiduMap": True,
+                "disableTianditu": True,
+                "requireMap": True,
+            }
+        )
+
+        scanned_regions = collect_amap.call_args.args[1]
+        self.assertEqual(len(scanned_regions), 16)
+        self.assertEqual(collect_amap.call_args.args[4:7], (1, 4, "directory"))
+        self.assertEqual(result["meta"]["mode"], "directory")
+        self.assertEqual(result["meta"]["province"], "安徽")
+        self.assertEqual(result["meta"]["citiesScanned"], 16)
+        self.assertEqual(result["meta"]["citiesWithResults"], 2)
+        self.assertEqual(result["meta"]["companyCount"], 2)
+        self.assertEqual(result["meta"]["phoneCount"], 1)
+        self.assertEqual(result["meta"]["contactCount"], 1)
+        city_stats = {item["city"]: item for item in result["meta"]["cityStats"]}
+        self.assertEqual(city_stats["合肥市"]["count"], 1)
+        self.assertEqual(city_stats["芜湖市"]["count"], 1)
+
+    @patch("app.collect_amap_leads", return_value=([], []))
+    def test_directory_collection_never_fabricates_fallback_companies(self, _collect_amap):
+        result = app.collect_leads(
+            {
+                "direction": "directory",
+                "directoryProvince": "安徽",
+                "sectors": ["wastewater"],
+                "collectionStrategy": "precision",
+                "amapKey": "test-key",
+                "disableBaiduMap": True,
+                "disableTianditu": True,
+                "requireMap": True,
+            }
+        )
+
+        self.assertEqual(result["leads"], [])
+        self.assertEqual(result["meta"]["mode"], "directory")
+        self.assertEqual(result["meta"]["companyCount"], 0)
+        self.assertIn("未发现", " ".join(result["errors"]))
+
     def test_health_status_reports_provider_presence_without_secret_values(self):
         with patch.dict(
             os.environ,

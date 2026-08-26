@@ -1,5 +1,7 @@
 const state = {
   downstreamSectors: {},
+  directorySectors: {},
+  provinceCities: {},
   upstreamSectors: {},
   competitorSectors: {},
   socialSectors: {},
@@ -25,7 +27,7 @@ const state = {
   selectedLeadIds: new Set(),
   pageItems: [],
   pageSize: 50,
-  pages: { database: 1, profiles: 1 },
+  pages: { database: 1, profiles: 1, directory: 1 },
   leadStoreLoadedAt: 0,
   runningMonitorPolls: new Set(),
   system: {},
@@ -35,10 +37,12 @@ const state = {
   hasEnvBaiduSearchApiKey: false,
   tursoConfigured: false,
   collectionStrategy: "precision",
+  directoryCityFilter: "",
 };
 
 const DIRECTION_LABELS = {
   downstream: "下游买家",
+  directory: "省级行业企业名录",
   upstream: "上游液钙副产企业",
   procurement: "招投标/采购",
   environmental: "含氟废水企业",
@@ -46,7 +50,7 @@ const DIRECTION_LABELS = {
   social: "社媒线索雷达",
 };
 
-const DIRECTION_ORDER = ["downstream", "upstream", "procurement", "environmental", "competitor", "social"];
+const DIRECTION_ORDER = ["downstream", "directory", "upstream", "procurement", "environmental", "competitor", "social"];
 
 const SALES_STATUS_LABELS = {
   new: "待核实",
@@ -104,6 +108,7 @@ function revealMotionItems(container, limit = 12) {
 function animateVisibleWorkspace() {
   const selectors = [
     ".metrics",
+    ".directory-summary:not([hidden])",
     ".filters:not([hidden])",
     ".notice:not([hidden])",
     ".quality-summary:not([hidden])",
@@ -260,7 +265,7 @@ function selectedCollectionStrategy() {
 
 function applyCollectionStrategy(strategy = selectedCollectionStrategy()) {
   state.collectionStrategy = strategy;
-  const settings = {
+  const standardSettings = {
     precision: {
       pages: 1,
       fast: true,
@@ -282,7 +287,31 @@ function applyCollectionStrategy(strategy = selectedCollectionStrategy()) {
       strict: false,
       note: "扩大候选范围，结果中会保留更多待核验企业。",
     },
-  }[strategy] || {};
+  };
+  const directorySettings = {
+    precision: {
+      pages: 1,
+      fast: true,
+      onlyPhone: false,
+      strict: true,
+      note: "扫描全省所有地级市，每类使用 2 组核心检索词；速度最快、结果更聚焦。",
+    },
+    balanced: {
+      pages: 1,
+      fast: false,
+      onlyPhone: false,
+      strict: true,
+      note: "扫描全省所有地级市，每类使用 4 组检索词；兼顾覆盖面与 API 用量。",
+    },
+    coverage: {
+      pages: 2,
+      fast: false,
+      onlyPhone: false,
+      strict: true,
+      note: "扫描全省所有地级市，每类使用最多 6 组检索词并翻页；覆盖更广，API 用量最高。",
+    },
+  };
+  const settings = (state.direction === "directory" ? directorySettings : standardSettings)[strategy] || {};
   if ($("#pages")) $("#pages").value = settings.pages || 1;
   if ($("#fast-mode")) $("#fast-mode").checked = Boolean(settings.fast);
   if ($("#only-phone")) {
@@ -326,7 +355,9 @@ function renderQualitySummary(leads) {
 
 function renderSectors() {
   const container = $("#sector-list");
-  const sectors = state.direction === "upstream"
+  const sectors = state.direction === "directory"
+    ? state.directorySectors
+    : state.direction === "upstream"
     ? state.upstreamSectors
     : state.direction === "competitor"
       ? state.competitorSectors
@@ -338,7 +369,9 @@ function renderSectors() {
       ? state.socialSectors
       : state.downstreamSectors;
   const defaults = new Set(
-    state.direction === "social"
+    state.direction === "directory"
+      ? ["wastewater"]
+      : state.direction === "social"
       ? ["liquid_calcium", "byproduct", "fluoride", "downstream", "industry_process"]
       : state.direction === "competitor"
       ? ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"]
@@ -372,6 +405,7 @@ function leadMatches(lead, query) {
   ) return false;
   if (!qualityFilterMatches(lead)) return false;
   if (!query) return true;
+  if (state.direction === "directory" && query === "待补电话") return !lead.phone;
   const haystack = [
     lead.company,
     lead.region,
@@ -529,18 +563,24 @@ function datetimeLocalValue(value) {
 }
 
 function currentPageKey() {
-  return state.view === "profiles" ? "profiles" : "database";
+  if (state.view === "profiles") return "profiles";
+  if (state.view === "collect" && state.direction === "directory") return "directory";
+  return "database";
 }
 
 function resetCurrentPage() {
-  if (["database", "profiles"].includes(state.view)) {
+  if (["database", "profiles"].includes(state.view) || (state.view === "collect" && state.direction === "directory")) {
     state.pages[currentPageKey()] = 1;
   }
 }
 
 function renderPagination(total) {
   const panel = $("#pagination");
-  const enabled = ["database", "profiles"].includes(state.view) && total > 0;
+  const directoryPaging = state.view === "collect"
+    && state.direction === "directory"
+    && total > state.pageSize;
+  const enabled = (["database", "profiles"].includes(state.view) && total > 0)
+    || directoryPaging;
   panel.hidden = !enabled;
   if (!enabled) {
     state.pageItems = state.filtered;
@@ -657,28 +697,34 @@ function renderMetrics(leads) {
     return;
   }
   const procurement = state.meta?.direction === "procurement" || state.direction === "procurement";
+  const directory = state.meta?.direction === "directory" || state.direction === "directory";
   const environmental = state.meta?.direction === "environmental" || state.direction === "environmental";
   const competitor = state.meta?.direction === "competitor" || state.direction === "competitor";
   const social = state.meta?.direction === "social" || state.direction === "social";
   $("#metric-count").textContent = leads.length;
-  $("#metric-hot").textContent = social
+  $("#metric-hot").textContent = directory
+    ? leads.filter((lead) => lead.phone || lead.email).length
+    : social
     ? leads.filter((lead) => Number(lead.social_intent_score || 0) >= 60 && !["irrelevant", "duplicate"].includes(lead.feedback_status)).length
     : leads.filter((lead) => ["A", "B"].includes(lead.quality_grade)).length;
-  $("#metric-phone").textContent = social
+  $("#metric-phone").textContent = directory
+    ? leads.filter((lead) => lead.phone).length
+    : social
     ? new Set(leads.map((lead) => lead.social_platform).filter(Boolean)).size
     : competitor
     ? leads.filter((lead) => lead.company_website).length
     : environmental
     ? leads.filter((lead) => lead.poi_id).length
     : leads.filter((lead) => lead.phone).length;
-  $("#metric-count-label").textContent = social ? "社媒账号/内容" : competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "线索数量";
-  $("#metric-hot-label").textContent = social ? "高意向" : competitor ? "重点同行" : procurement ? "重点项目" : "A/B级线索";
-  $("#metric-phone-label").textContent = social ? "覆盖平台" : competitor ? "已定位官网" : environmental ? "证据记录" : "含电话";
+  $("#metric-count-label").textContent = directory ? "企业总数" : social ? "社媒账号/内容" : competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "线索数量";
+  $("#metric-hot-label").textContent = directory ? "有联系方式" : social ? "高意向" : competitor ? "重点同行" : procurement ? "重点项目" : "A/B级线索";
+  $("#metric-phone-label").textContent = directory ? "有公开电话" : social ? "覆盖平台" : competitor ? "已定位官网" : environmental ? "证据记录" : "含电话";
   const modeLabels = {
     amap: "真实企业",
     baidu: "真实企业",
     tianditu: "真实企业",
     maps: "地图多源",
+    directory: "省级普查",
     task: "开发任务",
     need_key: "缺少 Key",
     procurement: "招采监控",
@@ -686,13 +732,76 @@ function renderMetrics(leads) {
     competitor: "竞品情报",
     social: "社媒公开索引",
   };
-  const mode = state.meta?.direction === "upstream" && ["amap", "baidu", "tianditu", "maps"].includes(state.meta?.mode)
+  const mode = directory && state.meta?.mode === "directory"
+    ? `${state.meta?.citiesWithResults || 0}/${state.meta?.citiesScanned || state.meta?.cityTotal || 0}`
+    : state.meta?.direction === "upstream" && ["amap", "baidu", "tianditu", "maps"].includes(state.meta?.mode)
     ? "上游副产"
     : state.leads.length || state.meta?.mode
       ? modeLabels[state.meta?.mode] || "待开始"
       : "待开始";
   $("#metric-mode").textContent = mode;
-  $("#metric-mode-label").textContent = "采集模式";
+  $("#metric-mode-label").textContent = directory ? "有结果/已扫描城市" : "采集模式";
+}
+
+function directoryCityMatches(lead, city) {
+  if (!city) return true;
+  const region = String(lead.region || "");
+  if (city !== "地区待细分") return region.includes(city);
+  const province = state.meta?.province || "";
+  const knownCities = state.provinceCities[province] || [];
+  return !knownCities.some((item) => region.includes(item));
+}
+
+function renderDirectorySummary() {
+  const panel = $("#directory-summary");
+  if (!panel) return;
+  const visible = state.view === "collect"
+    && state.direction === "directory"
+    && state.meta?.mode === "directory";
+  panel.hidden = !visible;
+  if (!visible) return;
+
+  const province = state.meta.province || $("#directory-province")?.value || "所选省份";
+  const sectorNames = selectedValues("sector")
+    .map((id) => state.directorySectors[id]?.name)
+    .filter(Boolean);
+  const companyCount = Number(state.meta.companyCount || state.leads.length || 0);
+  const phoneCount = Number(state.meta.phoneCount || 0);
+  const contactCount = Number(state.meta.contactCount || phoneCount);
+  const citiesScanned = Number(state.meta.citiesScanned || state.meta.cityTotal || 0);
+  const citiesWithResults = Number(state.meta.citiesWithResults || 0);
+  $("#directory-summary-title").textContent = `${province}省级企业名录`;
+  $("#directory-summary-note").textContent = state.directoryCityFilter
+    ? `正在查看 ${state.directoryCityFilter}；点击“查看全省”恢复全部 ${companyCount} 家企业。`
+    : `${sectorNames.join("、") || "所选行业"} · 已逐城扫描并跨地图来源去重。`;
+  $("#directory-clear-city").hidden = !state.directoryCityFilter;
+  $("#directory-summary-stats").innerHTML = `
+    <div><strong>${companyCount}</strong><span>全省企业</span></div>
+    <div><strong>${contactCount}</strong><span>有联系方式</span></div>
+    <div><strong>${phoneCount}</strong><span>有公开电话</span></div>
+    <div><strong>${citiesWithResults}/${citiesScanned}</strong><span>有结果/已扫描城市</span></div>
+  `;
+  const stats = Array.isArray(state.meta.cityStats) ? state.meta.cityStats : [];
+  $("#directory-city-list").innerHTML = stats.length
+    ? stats.map((item) => {
+      const selected = state.directoryCityFilter === item.city;
+      const empty = !Number(item.count || 0);
+      return `
+        <button
+          type="button"
+          class="directory-city ${selected ? "active" : ""} ${empty ? "empty" : ""}"
+          data-directory-city="${escapeHtml(item.city)}"
+          aria-pressed="${selected}"
+          ${empty ? "disabled" : ""}
+          title="${escapeHtml(item.city)}：${Number(item.count || 0)} 家，${Number(item.phoneCount || 0)} 家有电话"
+        >
+          <span>${escapeHtml(item.city)}</span>
+          <strong>${Number(item.count || 0)}</strong>
+          <small>${Number(item.phoneCount || 0)} 电话</small>
+        </button>
+      `;
+    }).join("")
+    : `<div class="empty-state compact">尚未生成城市统计。</div>`;
 }
 
 function renderLeads() {
@@ -703,11 +812,13 @@ function renderLeads() {
   state.filtered = source.filter((lead) => {
     if (state.view === "database" && status && lead.sales_status !== status) return false;
     if (state.view === "database" && direction && lead.direction !== direction) return false;
+    if (state.view === "collect" && state.direction === "directory" && !directoryCityMatches(lead, state.directoryCityFilter)) return false;
     if (!workQueueMatches(lead)) return false;
     return leadMatches(lead, query);
   });
   renderMetrics(state.filtered);
   renderQualitySummary(state.filtered);
+  renderDirectorySummary();
 
   const tbody = $("#lead-body");
   if (!state.filtered.length) {
@@ -718,8 +829,8 @@ function renderLeads() {
   }
 
   const displayedLeads = renderPagination(state.filtered.length);
-  const pageStart = state.view === "database"
-    ? (state.pages.database - 1) * state.pageSize
+  const pageStart = ["database", "profiles"].includes(state.view) || state.direction === "directory"
+    ? (state.pages[currentPageKey()] - 1) * state.pageSize
     : 0;
   tbody.innerHTML = displayedLeads
     .map((lead, index) => {
@@ -794,7 +905,7 @@ function renderLeads() {
         prospect: "工艺候选",
       };
       const role = lead.opportunity_role
-        ? `<span class="role-badge role-${escapeHtml(lead.opportunity_role)}">${escapeHtml(competitor ? "竞品同行" : roleLabels[lead.opportunity_role] || lead.opportunity_role)}</span>`
+        ? `<span class="role-badge role-${escapeHtml(lead.opportunity_role)}">${escapeHtml(competitor ? "竞品同行" : lead.direction === "directory" ? "行业名录" : roleLabels[lead.opportunity_role] || lead.opportunity_role)}</span>`
         : "";
       const checked = state.selectedLeadIds.has(Number(lead.id)) ? "checked" : "";
       return `
@@ -848,6 +959,8 @@ async function fetchConfig() {
   if (!response.ok) throw new Error("配置加载失败");
   const config = await response.json();
   state.downstreamSectors = config.downstreamSectors || config.sectors;
+  state.directorySectors = config.directorySectors || {};
+  state.provinceCities = config.provinceCities || {};
   state.upstreamSectors = config.upstreamSectors || {};
   state.competitorSectors = config.competitorSectors || {};
   state.socialSectors = config.socialSectors || {};
@@ -860,6 +973,16 @@ async function fetchConfig() {
   state.hasEnvTiandituTk = Boolean(config.hasEnvTiandituTk);
   state.hasEnvBaiduSearchApiKey = Boolean(config.hasEnvBaiduSearchApiKey);
   state.tursoConfigured = Boolean(config.tursoConfigured);
+  const provinceSelect = $("#directory-province");
+  if (provinceSelect) {
+    provinceSelect.innerHTML = `
+      <option value="">请选择省份</option>
+      ${Object.keys(state.provinceCities).map((province) => `
+        <option value="${escapeHtml(province)}">${escapeHtml(province)}（${state.provinceCities[province].length} 个城市）</option>
+      `).join("")}
+    `;
+    if (state.provinceCities.安徽) provinceSelect.value = "安徽";
+  }
   renderSectors();
   const mapSources = [
     state.hasEnvAmapKey ? "高德" : "",
@@ -1435,6 +1558,7 @@ async function switchView(view) {
   $(".filters").hidden = workbench || alerts || system;
   $("#notice").hidden = alerts || system;
   $("#quality-summary").hidden = workbench || alerts || system;
+  if (state.view !== "collect") $("#directory-summary").hidden = true;
   $("#pagination").hidden = workbench || alerts || system || state.view === "collect";
   $("#bulk-toolbar").hidden = !database || !state.selectedLeadIds.size;
   $("#progress-panel").hidden = workbench || alerts || system || !state.activeJobId;
@@ -1442,7 +1566,7 @@ async function switchView(view) {
   $("#crm-filters").hidden = !(database || profiles);
   $("#select-all-leads").hidden = !database;
   $("#save-monitor-button").hidden = state.view !== "collect";
-  $("#task-button").hidden = state.view !== "collect" || ["procurement", "environmental", "competitor"].includes(state.direction);
+  $("#task-button").hidden = state.view !== "collect" || ["directory", "procurement", "environmental", "competitor"].includes(state.direction);
   $("#export-button").hidden = workbench || alerts || system;
   $("#result-title").textContent = workbench
     ? "今日销售工作台"
@@ -1456,6 +1580,8 @@ async function switchView(view) {
         ? "系统运行中心"
       : state.direction === "competitor"
         ? "竞品/同行客户挖掘"
+      : state.direction === "directory"
+        ? "省级行业企业名录"
       : state.direction === "upstream"
         ? "液体氯化钙副产企业线索"
         : state.direction === "environmental"
@@ -1463,7 +1589,11 @@ async function switchView(view) {
           : state.direction === "procurement"
             ? "招投标/采购信息监控"
             : "潜在买家列表";
-  $("#filter").placeholder = database || profiles ? "搜索公司、负责人、备注、电话" : "输入公司、行业、地区、用途";
+  $("#filter").placeholder = database || profiles
+    ? "搜索公司、负责人、备注、电话"
+    : state.direction === "directory"
+      ? "搜索企业名称、城市、电话、地址"
+      : "输入公司、行业、地区、用途";
   if (workbench) await loadSalesWorkbench();
   else if (database) await loadSavedLeads();
   else if (profiles) await loadProfiles();
@@ -1484,13 +1614,17 @@ async function switchView(view) {
 function buildPayload() {
   const presets = selectedValues("regionPreset");
   const customRegions = $("#regions").value.trim();
-  const regions = [...presets];
-  if (customRegions) {
+  const directoryProvince = state.direction === "directory"
+    ? $("#directory-province")?.value || ""
+    : "";
+  const regions = directoryProvince ? [directoryProvince] : [...presets];
+  if (!directoryProvince && customRegions) {
     regions.push(...customRegions.split(/[,，、;\s]+/).filter(Boolean));
   }
 
   return {
     regions,
+    directoryProvince,
     direction: state.direction,
     sectors: selectedValues("sector"),
     customKeywords: $("#custom-keywords").value.trim(),
@@ -1551,6 +1685,9 @@ function restoreSearchDraft(direction) {
   const customRegions = (draft.regions || []).filter((region) => !REGION_LABELS[region]);
   setCheckedValues("regionPreset", regionPresets);
   $("#regions").value = customRegions.join(", ");
+  if (direction === "directory" && $("#directory-province")) {
+    $("#directory-province").value = draft.directoryProvince || customRegions[0] || "安徽";
+  }
   setCheckedValues("sector", draft.sectors || []);
   setCheckedValues("noticeType", draft.noticeTypes || []);
   setCheckedValues("procurementSource", draft.procurementSources || []);
@@ -1571,6 +1708,7 @@ function restoreSearchDraft(direction) {
 }
 
 function sectorLibraryForDirection(direction) {
+  if (direction === "directory") return state.directorySectors;
   if (direction === "upstream") return state.upstreamSectors;
   if (direction === "procurement") return state.procurementSectors;
   if (direction === "environmental") return state.environmentalSectors;
@@ -1580,6 +1718,7 @@ function sectorLibraryForDirection(direction) {
 }
 
 function defaultSectorsForDirection(direction) {
+  if (direction === "directory") return ["wastewater"];
   if (direction === "competitor") return ["liquid", "anhydrous", "dihydrate", "deicing", "desiccant"];
   if (direction === "social") return ["liquid_calcium", "byproduct", "fluoride", "downstream", "industry_process"];
   if (direction === "environmental") return ["fluorochemicals", "rare_earth", "phosphorus", "surface_treatment", "electronics"];
@@ -1607,6 +1746,8 @@ function renderMonitorSectors(direction, selected = []) {
   const selectedSet = new Set(selected.length ? selected : defaultSectorsForDirection(direction));
   $("#monitor-sector-title").textContent = direction === "procurement"
     ? "监控主题"
+    : direction === "directory"
+      ? "省级名录类型"
     : direction === "competitor"
       ? "竞品产品/应用方向"
       : direction === "social"
@@ -1635,9 +1776,12 @@ function updateMonitorSummary() {
     .filter(Boolean).length;
   const expandedRegions = regions.flatMap((region) => state.regionPresets[region] || [REGION_LABELS[region] || region]);
   const platformCount = direction === "social" ? selectedValues("socialPlatform").length : 0;
+  const regionSummary = direction === "directory"
+    ? `省份：${customRegions || "未选择"}`
+    : `地区：${expandedRegions.join("、") || "未选择"}${customRegions ? `；自定义：${customRegions}` : ""}`;
   $("#monitor-summary").textContent = [
     `类型：${DIRECTION_LABELS[direction] || "下游买家"}`,
-    `地区：${expandedRegions.join("、") || "未选择"}${customRegions ? `；自定义：${customRegions}` : ""}`,
+    regionSummary,
     `行业/主题：${sectorCount} 项${customKeywordCount ? `；自定义关键词：${customKeywordCount} 个` : ""}`,
     platformCount ? `平台：${platformCount} 个` : "",
   ].filter(Boolean).join("；");
@@ -1645,29 +1789,46 @@ function updateMonitorSummary() {
 
 function buildMonitorPayload() {
   const base = buildPayload();
+  const direction = $("#monitor-direction").value;
   const regions = monitorSelectedValues("monitorRegionPreset");
   const customRegions = $("#monitor-regions").value.trim();
   if (customRegions) {
     regions.push(...customRegions.split(/[,，、;\s]+/).filter(Boolean));
   }
+  const directoryProvince = direction === "directory" ? regions.find((item) => !REGION_LABELS[item]) || "" : "";
   return {
     ...base,
-    direction: $("#monitor-direction").value,
-    regions,
+    direction,
+    directoryProvince,
+    regions: directoryProvince ? [directoryProvince] : regions,
     sectors: monitorSelectedValues("monitorSector"),
     customKeywords: $("#monitor-custom-keywords").value.trim(),
   };
 }
 
+function updateDirectoryScopeNote() {
+  const province = $("#directory-province")?.value || "";
+  const cityCount = state.provinceCities[province]?.length || 0;
+  $("#directory-scope-note").textContent = province
+    ? `${province}包含 ${cityCount} 个地级行政区。系统会逐城检索，并跨关键词、跨地图平台自动合并重复企业。`
+    : "选择后会自动逐个扫描该省所有地级市，并将重复企业合并成一份名录。";
+}
+
 function setDirection(direction) {
-  state.direction = ["upstream", "procurement", "environmental", "competitor", "social"].includes(direction) ? direction : "downstream";
+  state.direction = ["directory", "upstream", "procurement", "environmental", "competitor", "social"].includes(direction) ? direction : "downstream";
+  const directory = state.direction === "directory";
   const upstream = state.direction === "upstream";
   const procurement = state.direction === "procurement";
   const environmental = state.direction === "environmental";
   const competitor = state.direction === "competitor";
   const social = state.direction === "social";
   renderSectors();
-  $("#sector-title").textContent = social
+  $("#standard-region-section").hidden = directory;
+  $("#directory-scope-section").hidden = !directory;
+  updateDirectoryScopeNote();
+  $("#sector-title").textContent = directory
+    ? "行业名录类型"
+    : social
     ? "社媒监控主题"
     : competitor
     ? "竞品产品/应用方向"
@@ -1678,7 +1839,9 @@ function setDirection(direction) {
     : procurement
       ? "监控主题"
       : "下游行业";
-  $("#direction-note").textContent = social
+  $("#direction-note").textContent = directory
+    ? "锁定一个省份，自动展开全部地级市，汇总具体企业名称、公开电话、地址和地图来源。"
+    : social
     ? "选择平台、地区和业务主题即可直接检索；公开链接只是可选补充。"
     : competitor
     ? "检索同行官网和公开平台供应商，整理其重点行业、地区、应用词和公开证据，再反向开发同类客户。"
@@ -1689,7 +1852,9 @@ function setDirection(direction) {
     : procurement
       ? "按具体采购单位归并官方公告，并默认核验企业官网；无法确认采购单位的搜索入口不会写入线索库。"
       : "查找可能采购氯化钙的下游企业。";
-  $("#custom-keywords").placeholder = social
+  $("#custom-keywords").placeholder = directory
+    ? "可选，例如：城镇污水处理厂, 再生水厂, 园区污水处理"
+    : social
     ? "例如：液钙求购, 副产液钙处置, 含氟废水, 除氟改造"
     : competitor
     ? "例如：液钙槽车, 山东融雪剂, 食品级氯化钙, 出口"
@@ -1702,16 +1867,18 @@ function setDirection(direction) {
       : "例如：融雪剂厂家, 集装箱干燥剂, 钻井液";
   $("#exclude-suppliers-wrap").hidden = !upstream;
   $("#strict-upstream-wrap").hidden = !upstream;
-  $("#pages-wrap").hidden = procurement || competitor || social;
-  $("#only-phone-wrap").hidden = procurement || environmental || competitor || social;
-  $("#fast-mode-wrap").hidden = procurement || environmental || competitor || social;
+  $("#pages-wrap").hidden = directory || procurement || competitor || social;
+  $("#only-phone-wrap").hidden = directory || procurement || environmental || competitor || social;
+  $("#fast-mode-wrap").hidden = directory || procurement || environmental || competitor || social;
   $("#procurement-options").hidden = !procurement;
   $("#environmental-options").hidden = !environmental;
   $("#competitor-options").hidden = !competitor;
   $("#social-options").hidden = !social;
   $("#api-status").hidden = procurement || environmental || competitor || social;
-  $("#only-phone").checked = !upstream && !procurement && !environmental && !competitor && !social;
-  $("#result-title").textContent = social
+  $("#only-phone").checked = !directory && !upstream && !procurement && !environmental && !competitor && !social;
+  $("#result-title").textContent = directory
+    ? "省级行业企业名录"
+    : social
     ? "社媒公开线索"
     : competitor
     ? "竞品/同行客户挖掘"
@@ -1722,12 +1889,14 @@ function setDirection(direction) {
     : procurement
       ? "招投标/采购信息监控"
       : "潜在买家列表";
-  $("#reason-heading").textContent = social ? "命中依据" : competitor ? "同行公开证据" : upstream ? "工艺匹配依据" : environmental ? "含氟证据依据" : procurement ? "监控规则" : "匹配原因";
-  $("#pitch-heading").textContent = social ? "核验建议" : competitor ? "反向开发建议" : upstream ? "核实重点" : environmental ? "处理核实重点" : procurement ? "跟进重点" : "跟进话术";
-  $("th:nth-child(3)").textContent = social ? "账号/内容" : competitor ? "同行供应商" : procurement ? "采购单位/项目" : environmental ? "含氟企业" : "公司/任务";
-  $("th:nth-child(4)").textContent = social ? "主题" : competitor ? "重点产品" : procurement ? "公告类型" : "行业";
+  $("#reason-heading").textContent = directory ? "名录匹配依据" : social ? "命中依据" : competitor ? "同行公开证据" : upstream ? "工艺匹配依据" : environmental ? "含氟证据依据" : procurement ? "监控规则" : "匹配原因";
+  $("#pitch-heading").textContent = directory ? "核实与开发建议" : social ? "核验建议" : competitor ? "反向开发建议" : upstream ? "核实重点" : environmental ? "处理核实重点" : procurement ? "跟进重点" : "跟进话术";
+  $("th:nth-child(3)").textContent = directory ? "企业/处理厂" : social ? "账号/内容" : competitor ? "同行供应商" : procurement ? "采购单位/项目" : environmental ? "含氟企业" : "公司/任务";
+  $("th:nth-child(4)").textContent = directory ? "名录类型" : social ? "主题" : competitor ? "重点产品" : procurement ? "公告类型" : "行业";
   $("th:nth-child(6)").textContent = social ? "平台/证据" : competitor ? "证据数量" : environmental ? "证据编号/类型" : "电话";
-  $("#collect-button-label").textContent = social
+  $("#collect-button-label").textContent = directory
+    ? "开始全省逐城普查"
+    : social
     ? "开始公开索引检索"
     : competitor
     ? "采集同行供应商并生成画像"
@@ -1738,8 +1907,17 @@ function setDirection(direction) {
     : procurement
       ? "采集采购单位和项目信息"
       : "采集具体公司和电话";
-  $("#task-button").hidden = procurement || environmental || competitor || social;
-  $("#quick-filters").innerHTML = social
+  $("#task-button").hidden = directory || procurement || environmental || competitor || social;
+  $("#quick-filters").innerHTML = directory
+    ? `
+      <button type="button" data-filter="">全部企业</button>
+      <button type="button" data-filter="污水处理厂">污水处理厂</button>
+      <button type="button" data-filter="水质净化">水质净化</button>
+      <button type="button" data-filter="再生水">再生水厂</button>
+      <button type="button" data-filter="水务">水务运营</button>
+      <button type="button" data-filter="待补电话">待补电话</button>
+    `
+    : social
     ? `
       <button type="button" data-filter="">全部</button>
       <button type="button" data-filter="求购/采购">求购</button>
@@ -1801,14 +1979,19 @@ function setDirection(direction) {
   state.leads = [];
   state.filtered = [];
   state.meta = {};
+  state.directoryCityFilter = "";
+  state.pages.directory = 1;
   $("#filter").value = "";
   $("#progress-panel").hidden = true;
+  $("#directory-summary").hidden = true;
   $("#export-button").disabled = true;
-  $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="9">选择地区和行业后开始采集。</td></tr>`;
+  $("#lead-body").innerHTML = `<tr class="empty-row"><td colspan="9">${directory ? "选择省份和名录类型后开始全省普查。" : "选择地区和行业后开始采集。"}</td></tr>`;
   renderMetrics([]);
   renderQualitySummary([]);
   setNotice(
-    social
+    directory
+      ? "选择省份和行业类型后，系统会逐城汇总具体企业、公开电话和地址；无公开电话的企业也会保留。"
+      : social
       ? "无需粘贴链接，选择地区、主题和平台后即可开始公开索引检索。"
       : competitor
       ? "选择地区、产品方向和公开来源后，系统会生成同行画像及反向开发建议。"
@@ -1820,13 +2003,29 @@ function setDirection(direction) {
         ? "选择监控主题、公告类型和时间范围后采集真实采购单位。"
         : "当前为下游买家采集模式。",
   );
-  restoreSearchDraft(state.direction) || applyCollectionStrategy();
+  const restoredDraft = restoreSearchDraft(state.direction);
+  if (!restoredDraft && directory) {
+    const balanced = document.querySelector('input[name="collectionStrategy"][value="balanced"]');
+    if (balanced) balanced.checked = true;
+    applyCollectionStrategy("balanced");
+  } else if (!restoredDraft) {
+    applyCollectionStrategy();
+  }
+  updateDirectoryScopeNote();
   replayMotion($(".controls"), "direction-refresh");
 }
 
 async function runSearch(mode = "amap") {
   const button = $("#lead-form button[type='submit']");
   const payload = buildPayload();
+  if (state.direction === "directory" && !payload.directoryProvince) {
+    setNotice("请先选择要普查的省份。", true);
+    return;
+  }
+  if (state.direction === "directory" && !payload.sectors.length) {
+    setNotice("请至少选择一种行业名录类型。", true);
+    return;
+  }
   if (state.direction === "procurement" && !payload.procurementSources.length) {
     setNotice("请至少选择一个采集来源。", true);
     return;
@@ -1854,11 +2053,15 @@ async function runSearch(mode = "amap") {
     return;
   }
   saveSearchDraft(payload);
+  state.directoryCityFilter = "";
+  state.pages.directory = 1;
   button.disabled = true;
   button.textContent = "正在采集...";
   const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
   setNotice(
-    state.direction === "social"
+    state.direction === "directory"
+      ? `正在逐城扫描${payload.directoryProvince}的 ${state.provinceCities[payload.directoryProvince]?.length || 0} 个地级行政区，并自动合并重复企业。`
+      : state.direction === "social"
       ? "正在识别导入链接，并按平台检索公开索引。"
       : state.direction === "competitor"
       ? "正在聚合同行官网和平台公开页面，并分析行业、地区与关键词布局。"
@@ -1892,7 +2095,9 @@ async function runSearch(mode = "amap") {
   try {
     showProgress(
       mode === "amap"
-        ? state.direction === "social"
+        ? state.direction === "directory"
+          ? `正在逐城普查${payload.directoryProvince}企业名录`
+          : state.direction === "social"
           ? "正在扫描社媒公开线索"
           : state.direction === "competitor"
           ? "正在构建同行画像"
@@ -1925,7 +2130,9 @@ async function runSearch(mode = "amap") {
   } finally {
     button.disabled = false;
     button.innerHTML = `<span id="collect-button-label">${
-      state.direction === "procurement"
+      state.direction === "directory"
+        ? "开始全省逐城普查"
+        : state.direction === "procurement"
         ? "采集采购单位和项目信息"
         : state.direction === "social"
           ? "开始公开索引检索"
@@ -1963,11 +2170,12 @@ function updateProgress(job) {
   $("#progress-companies").textContent = job.companyCount || 0;
   $("#progress-phones").textContent = job.phoneCount || 0;
   const procurement = state.direction === "procurement";
+  const directory = state.direction === "directory";
   const environmental = state.direction === "environmental";
   const competitor = state.direction === "competitor";
   const social = state.direction === "social";
-  $("#progress-requests-label").textContent = procurement || environmental || competitor || social ? "查询" : "请求";
-  $("#progress-companies-label").textContent = social ? "已识别账号" : competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "企业";
+  $("#progress-requests-label").textContent = directory ? "城市查询" : procurement || environmental || competitor || social ? "查询" : "请求";
+  $("#progress-companies-label").textContent = directory ? "已归并企业" : social ? "已识别账号" : competitor ? "同行供应商" : procurement ? "采购单位" : environmental ? "含氟企业" : "企业";
   $("#progress-phones-label").textContent = competitor ? "已定位官网" : environmental ? "证据记录" : "有电话";
 }
 
@@ -2005,7 +2213,10 @@ function applySearchResult(data) {
   const warnings = data.errors?.length ? ` ${data.errors[0]}` : "";
   const realCount = data.meta?.companyCount || 0;
   const phoneCount = data.meta?.phoneCount || 0;
-  const summary = ["amap", "baidu", "tianditu", "maps"].includes(data.meta?.mode)
+  const contactCount = data.meta?.contactCount || phoneCount;
+  const summary = data.meta?.mode === "directory"
+    ? `${data.meta?.province || "所选省份"}省级普查完成：扫描 ${data.meta?.citiesScanned || 0}/${data.meta?.cityTotal || 0} 个城市，汇总 ${realCount} 家具体企业，其中 ${contactCount} 家有联系方式、${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次地图查询。`
+    : ["amap", "baidu", "tianditu", "maps"].includes(data.meta?.mode)
     ? data.meta?.direction === "upstream"
       ? `已通过${(data.meta?.mapSources || []).join("、") || "地图服务"}发现 ${realCount} 家可能副产液体氯化钙的企业，其中 ${phoneCount} 家有电话；请按相关度核实工艺。`
       : `已通过${(data.meta?.mapSources || []).join("、") || "地图服务"}采集 ${realCount} 家具体公司，其中 ${phoneCount} 家有电话；完成 ${data.meta?.requestCount || 0} 次查询。`
@@ -2380,7 +2591,9 @@ function openMonitorDialog() {
   $("#monitor-name").value = `${DIRECTION_LABELS[state.direction]}监控`;
   $("#monitor-direction").value = state.direction;
   renderMonitorRegions(payload.regions.filter((region) => REGION_LABELS[region]));
-  $("#monitor-regions").value = $("#regions").value.trim();
+  $("#monitor-regions").value = state.direction === "directory"
+    ? payload.directoryProvince || ""
+    : $("#regions").value.trim();
   renderMonitorSectors(state.direction, payload.sectors);
   $("#monitor-custom-keywords").value = payload.customKeywords || "";
   updateMonitorSummary();
@@ -2390,6 +2603,15 @@ function openMonitorDialog() {
 async function saveMonitor(event) {
   event.preventDefault();
   const button = $("#monitor-form button[type='submit']");
+  const payload = buildMonitorPayload();
+  if (payload.direction === "directory" && !state.provinceCities[payload.directoryProvince]) {
+    setNotice("省级名录监控需要填写一个有效省份，例如：安徽。", true);
+    return;
+  }
+  if (!payload.sectors.length) {
+    setNotice("请至少选择一个监控行业或主题。", true);
+    return;
+  }
   button.disabled = true;
   try {
     await fetchJson("/api/monitors/save", {
@@ -2398,7 +2620,7 @@ async function saveMonitor(event) {
       body: JSON.stringify({
         name: $("#monitor-name").value,
         intervalHours: Number($("#monitor-interval").value),
-        payload: buildMonitorPayload(),
+        payload,
       }),
     });
     await closeDialogSmooth($("#monitor-dialog"));
@@ -2585,7 +2807,14 @@ async function exportCsv() {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "calcium-chloride-leads.csv";
+  const directorySector = selectedValues("sector")
+    .map((id) => state.directorySectors[id]?.name)
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("-");
+  anchor.download = state.view === "collect" && state.direction === "directory"
+    ? `${state.meta?.province || "省级"}-${directorySector || "企业"}名录.csv`
+    : "calcium-chloride-leads.csv";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -2635,6 +2864,7 @@ function bindEvents() {
     state.pageSize = Number(event.target.value) || 50;
     state.pages.database = 1;
     state.pages.profiles = 1;
+    state.pages.directory = 1;
     renderCurrentResults();
   });
   $("#page-prev").addEventListener("click", () => {
@@ -2682,6 +2912,20 @@ function bindEvents() {
   });
   $$('input[name="direction"]').forEach((input) => {
     input.addEventListener("change", () => setDirection(input.value));
+  });
+  $("#directory-province").addEventListener("change", updateDirectoryScopeNote);
+  $("#directory-city-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-directory-city]");
+    if (!button || button.disabled) return;
+    state.directoryCityFilter = button.dataset.directoryCity || "";
+    resetCurrentPage();
+    renderLeads();
+    $("#directory-summary").scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "nearest" });
+  });
+  $("#directory-clear-city").addEventListener("click", () => {
+    state.directoryCityFilter = "";
+    resetCurrentPage();
+    renderLeads();
   });
   $("#lead-body").addEventListener("click", (event) => {
     const reverseButton = event.target.closest("[data-reverse-index]");
@@ -2756,6 +3000,10 @@ function bindEvents() {
   $("#monitor-direction").addEventListener("change", () => {
     const direction = $("#monitor-direction").value;
     renderMonitorSectors(direction);
+    if (direction === "directory" && !$("#monitor-regions").value.trim()) {
+      $("#monitor-regions").value = $("#directory-province").value || "安徽";
+      renderMonitorRegions([]);
+    }
     if (!$("#monitor-name").value.trim() || DIRECTION_ORDER.some((item) => $("#monitor-name").value === `${DIRECTION_LABELS[item]}监控`)) {
       $("#monitor-name").value = `${DIRECTION_LABELS[direction]}监控`;
     }

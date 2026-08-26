@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=sales-workbench-1" />
+    <link rel="stylesheet" href="/styles.css?v=province-directory-1" />
   </head>
   <body>
     <div class="app">
@@ -25,6 +25,10 @@
               <label>
                 <input type="radio" name="direction" value="downstream" checked />
                 <span>下游买家</span>
+              </label>
+              <label>
+                <input type="radio" name="direction" value="directory" />
+                <span>省级行业企业名录</span>
               </label>
               <label>
                 <input type="radio" name="direction" value="upstream" />
@@ -71,7 +75,7 @@
             <div id="strategy-note" class="direction-note">优先返回证据较强、可直接联系的企业。</div>
           </section>
 
-          <section>
+          <section id="standard-region-section">
             <div class="section-title">目标地区</div>
             <div class="region-grid">
               <label><input type="checkbox" name="regionPreset" value="north" /> 华北</label>
@@ -86,6 +90,19 @@
               <span>自定义省市</span>
               <input id="regions" type="text" placeholder="例如：山东, 河北, 黑龙江" />
             </label>
+          </section>
+
+          <section id="directory-scope-section" hidden>
+            <div class="section-title">锁定一个省份</div>
+            <label class="field">
+              <span>省级行政区</span>
+              <select id="directory-province" aria-label="省级行政区">
+                <option value="">请选择省份</option>
+              </select>
+            </label>
+            <div id="directory-scope-note" class="direction-note">
+              选择后会自动逐个扫描该省所有地级市，并将重复企业合并成一份名录。
+            </div>
           </section>
 
           <section>
@@ -346,6 +363,26 @@
           </div>
         </section>
 
+        <section id="directory-summary" class="directory-summary" hidden aria-live="polite">
+          <div class="directory-summary-head">
+            <div>
+              <span class="directory-kicker">省级普查结果</span>
+              <h3 id="directory-summary-title">省级行业企业名录</h3>
+              <p id="directory-summary-note">逐城扫描公开地图企业信息，并跨来源自动去重。</p>
+            </div>
+            <button id="directory-clear-city" class="secondary" type="button" hidden>查看全省</button>
+          </div>
+          <div id="directory-summary-stats" class="directory-summary-stats"></div>
+          <div class="directory-city-section">
+            <div class="directory-city-heading">
+              <strong>城市分布</strong>
+              <span>点击城市可筛选结果</span>
+            </div>
+            <div id="directory-city-list" class="directory-city-list"></div>
+          </div>
+          <p class="directory-disclaimer">统计基于已接入地图平台的公开登记结果，不等同于行政许可中的绝对全量；无公开电话的企业仍会保留。</p>
+        </section>
+
         <section class="filters">
           <label class="field search">
             <span>快速筛选</span>
@@ -386,6 +423,7 @@
               <select id="direction-filter">
                 <option value="">全部类型</option>
                 <option value="downstream">下游买家</option>
+                <option value="directory">省级企业名录</option>
                 <option value="upstream">上游液钙</option>
                 <option value="procurement">招采信息</option>
                 <option value="environmental">含氟企业</option>
@@ -710,6 +748,7 @@
           <span>采集方向</span>
           <select id="profile-direction">
             <option value="downstream">下游买家</option>
+            <option value="directory">省级企业名录</option>
             <option value="upstream">上游液钙副产企业</option>
             <option value="procurement">招投标/采购</option>
             <option value="environmental">含氟废水企业</option>
@@ -836,6 +875,7 @@
           <span>监控方向</span>
           <select id="monitor-direction">
             <option value="downstream">下游买家</option>
+            <option value="directory">省级企业名录</option>
             <option value="upstream">上游液钙副产企业</option>
             <option value="procurement">招投标/采购</option>
             <option value="environmental">含氟废水企业</option>
@@ -879,6 +919,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=sales-workbench-1"></script>
+    <script src="/app.js?v=province-directory-1"></script>
   </body>
 </html>
