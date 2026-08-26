@@ -186,12 +186,12 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v12.0-province-directory"
+APP_VERSION = "liquid-calcium-ops-v12.1-national-directory"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
     "downstream": "下游买家",
-    "directory": "省级行业企业名录",
+    "directory": "全国分省企业名录",
     "upstream": "上游液钙副产企业",
     "procurement": "招投标/采购",
     "environmental": "含氟废水企业",
@@ -895,6 +895,17 @@ REGION_PRESETS: dict[str, list[str]] = {
     "southwest": ["重庆", "四川", "贵州", "云南", "西藏"],
     "northwest": ["陕西", "甘肃", "青海", "宁夏", "新疆"],
 }
+
+PROVINCE_GROUPS: list[dict[str, Any]] = [
+    {"id": "north", "name": "华北", "provinces": REGION_PRESETS["north"]},
+    {"id": "northeast", "name": "东北", "provinces": REGION_PRESETS["northeast"]},
+    {"id": "east", "name": "华东", "provinces": REGION_PRESETS["east"]},
+    {"id": "central", "name": "华中", "provinces": REGION_PRESETS["central"]},
+    {"id": "south", "name": "华南", "provinces": REGION_PRESETS["south"]},
+    {"id": "southwest", "name": "西南", "provinces": REGION_PRESETS["southwest"]},
+    {"id": "northwest", "name": "西北", "provinces": REGION_PRESETS["northwest"]},
+    {"id": "hmt", "name": "港澳台", "provinces": ["香港", "澳门", "台湾"]},
+]
 
 
 DIRECTORY_SECTOR_LIBRARY: dict[str, dict[str, Any]] = {
@@ -9712,6 +9723,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "downstreamSectors": SECTOR_LIBRARY,
                     "directorySectors": DIRECTORY_SECTOR_LIBRARY,
                     "provinceCities": PROVINCE_CITY_MAP,
+                    "provinceGroups": PROVINCE_GROUPS,
+                    "provinceCoverage": {
+                        "provinceCount": len(PROVINCE_CITY_MAP),
+                        "searchUnitCount": sum(
+                            len(cities) for cities in PROVINCE_CITY_MAP.values()
+                        ),
+                    },
                     "upstreamSectors": UPSTREAM_SECTOR_LIBRARY,
                     "competitorSectors": COMPETITOR_SECTOR_LIBRARY,
                     "competitorSources": COMPETITOR_SOURCE_LIBRARY,

@@ -159,6 +159,46 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertEqual(len(app.directory_scan_regions("海南")), 19)
         self.assertIn("台湾省台北市", app.directory_scan_regions("台湾"))
 
+    def test_directory_coverage_contains_every_province_level_region(self):
+        expected = {
+            "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+            "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
+            "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
+            "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆", "台湾",
+            "香港", "澳门",
+        }
+        self.assertEqual(set(app.PROVINCE_CITY_MAP), expected)
+        self.assertEqual(len(app.PROVINCE_CITY_MAP), 34)
+        self.assertEqual(sum(map(len, app.PROVINCE_CITY_MAP.values())), 393)
+
+        grouped = [
+            province
+            for group in app.PROVINCE_GROUPS
+            for province in group["provinces"]
+        ]
+        self.assertEqual(set(grouped), expected)
+        self.assertEqual(len(grouped), len(set(grouped)))
+
+        full_names = {
+            "北京": "北京市",
+            "天津": "天津市",
+            "上海": "上海市",
+            "重庆": "重庆市",
+            "内蒙古": "内蒙古自治区",
+            "广西": "广西壮族自治区",
+            "西藏": "西藏自治区",
+            "宁夏": "宁夏回族自治区",
+            "新疆": "新疆维吾尔自治区",
+            "香港": "香港特别行政区",
+            "澳门": "澳门特别行政区",
+        }
+        for province, cities in app.PROVINCE_CITY_MAP.items():
+            query = full_names.get(province, f"{province}省")
+            regions = app.directory_scan_regions(query)
+            self.assertEqual(len(regions), len(cities), province)
+            self.assertEqual(len(regions), len(set(regions)), province)
+            self.assertTrue(all(region for region in regions), province)
+
     def test_directory_match_keeps_operators_and_rejects_vendors(self):
         sector = app.DIRECTORY_SECTOR_LIBRARY["wastewater"]
 
@@ -243,6 +283,57 @@ class LiquidCalciumAppTests(unittest.TestCase):
         city_stats = {item["city"]: item for item in result["meta"]["cityStats"]}
         self.assertEqual(city_stats["合肥市"]["count"], 1)
         self.assertEqual(city_stats["芜湖市"]["count"], 1)
+
+    @patch("app.collect_amap_leads")
+    def test_directory_collection_supports_guangdong_and_its_city_stats(self, collect_amap):
+        collect_amap.return_value = (
+            [
+                app.Lead(
+                    company="广州市净水有限公司",
+                    region="广东省 广州市 天河区",
+                    sector="污水处理厂/水质净化厂",
+                    source="高德 POI",
+                    score=72,
+                    phone="020-12345678",
+                    direction="directory",
+                ),
+                app.Lead(
+                    company="深圳市水质净化有限公司",
+                    region="广东省 深圳市 南山区",
+                    sector="污水处理厂/水质净化厂",
+                    source="高德 POI",
+                    score=70,
+                    direction="directory",
+                ),
+            ],
+            [],
+        )
+
+        result = app.collect_leads(
+            {
+                "direction": "directory",
+                "directoryProvince": "广东省",
+                "sectors": ["wastewater"],
+                "collectionStrategy": "balanced",
+                "amapKey": "test-key",
+                "disableBaiduMap": True,
+                "disableTianditu": True,
+                "requireMap": True,
+            }
+        )
+
+        scanned_regions = collect_amap.call_args.args[1]
+        self.assertEqual(len(scanned_regions), 21)
+        self.assertIn("广东省广州市", scanned_regions)
+        self.assertIn("广东省深圳市", scanned_regions)
+        self.assertEqual(result["meta"]["province"], "广东")
+        self.assertEqual(result["meta"]["citiesScanned"], 21)
+        self.assertEqual(result["meta"]["citiesWithResults"], 2)
+        self.assertEqual(result["meta"]["companyCount"], 2)
+        self.assertEqual(result["meta"]["contactCount"], 1)
+        city_stats = {item["city"]: item for item in result["meta"]["cityStats"]}
+        self.assertEqual(city_stats["广州市"]["count"], 1)
+        self.assertEqual(city_stats["深圳市"]["count"], 1)
 
     @patch("app.collect_amap_leads", return_value=([], []))
     def test_directory_collection_never_fabricates_fallback_companies(self, _collect_amap):

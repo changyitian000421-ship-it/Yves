@@ -2,6 +2,8 @@ const state = {
   downstreamSectors: {},
   directorySectors: {},
   provinceCities: {},
+  provinceGroups: [],
+  provinceCoverage: {},
   upstreamSectors: {},
   competitorSectors: {},
   socialSectors: {},
@@ -42,7 +44,7 @@ const state = {
 
 const DIRECTION_LABELS = {
   downstream: "下游买家",
-  directory: "省级行业企业名录",
+  directory: "全国分省企业名录",
   upstream: "上游液钙副产企业",
   procurement: "招投标/采购",
   environmental: "含氟废水企业",
@@ -294,21 +296,21 @@ function applyCollectionStrategy(strategy = selectedCollectionStrategy()) {
       fast: true,
       onlyPhone: false,
       strict: true,
-      note: "扫描全省所有地级市，每类使用 2 组核心检索词；速度最快、结果更聚焦。",
+      note: "扫描全省所有逐城检索单元，每类使用 2 组核心检索词；速度最快、结果更聚焦。",
     },
     balanced: {
       pages: 1,
       fast: false,
       onlyPhone: false,
       strict: true,
-      note: "扫描全省所有地级市，每类使用 4 组检索词；兼顾覆盖面与 API 用量。",
+      note: "扫描全省所有逐城检索单元，每类使用 4 组检索词；兼顾覆盖面与 API 用量。",
     },
     coverage: {
       pages: 2,
       fast: false,
       onlyPhone: false,
       strict: true,
-      note: "扫描全省所有地级市，每类使用最多 6 组检索词并翻页；覆盖更广，API 用量最高。",
+      note: "扫描全省所有逐城检索单元，每类使用最多 6 组检索词并翻页；覆盖更广，API 用量最高。",
     },
   };
   const settings = (state.direction === "directory" ? directorySettings : standardSettings)[strategy] || {};
@@ -961,6 +963,8 @@ async function fetchConfig() {
   state.downstreamSectors = config.downstreamSectors || config.sectors;
   state.directorySectors = config.directorySectors || {};
   state.provinceCities = config.provinceCities || {};
+  state.provinceGroups = config.provinceGroups || [];
+  state.provinceCoverage = config.provinceCoverage || {};
   state.upstreamSectors = config.upstreamSectors || {};
   state.competitorSectors = config.competitorSectors || {};
   state.socialSectors = config.socialSectors || {};
@@ -975,13 +979,26 @@ async function fetchConfig() {
   state.tursoConfigured = Boolean(config.tursoConfigured);
   const provinceSelect = $("#directory-province");
   if (provinceSelect) {
+    const groupedProvinces = new Set();
+    const groupedOptions = state.provinceGroups.map((group) => {
+      const options = (group.provinces || [])
+        .filter((province) => state.provinceCities[province])
+        .map((province) => {
+          groupedProvinces.add(province);
+          return `<option value="${escapeHtml(province)}">${escapeHtml(province)}（${state.provinceCities[province].length} 个检索单元）</option>`;
+        })
+        .join("");
+      return options ? `<optgroup label="${escapeHtml(group.name)}">${options}</optgroup>` : "";
+    }).join("");
+    const ungroupedOptions = Object.keys(state.provinceCities)
+      .filter((province) => !groupedProvinces.has(province))
+      .map((province) => `<option value="${escapeHtml(province)}">${escapeHtml(province)}（${state.provinceCities[province].length} 个检索单元）</option>`)
+      .join("");
     provinceSelect.innerHTML = `
-      <option value="">请选择省份</option>
-      ${Object.keys(state.provinceCities).map((province) => `
-        <option value="${escapeHtml(province)}">${escapeHtml(province)}（${state.provinceCities[province].length} 个城市）</option>
-      `).join("")}
+      <option value="">请选择任意省份</option>
+      ${groupedOptions}
+      ${ungroupedOptions ? `<optgroup label="其他">${ungroupedOptions}</optgroup>` : ""}
     `;
-    if (state.provinceCities.安徽) provinceSelect.value = "安徽";
   }
   renderSectors();
   const mapSources = [
@@ -1581,7 +1598,7 @@ async function switchView(view) {
       : state.direction === "competitor"
         ? "竞品/同行客户挖掘"
       : state.direction === "directory"
-        ? "省级行业企业名录"
+        ? "全国分省企业名录"
       : state.direction === "upstream"
         ? "液体氯化钙副产企业线索"
         : state.direction === "environmental"
@@ -1686,7 +1703,7 @@ function restoreSearchDraft(direction) {
   setCheckedValues("regionPreset", regionPresets);
   $("#regions").value = customRegions.join(", ");
   if (direction === "directory" && $("#directory-province")) {
-    $("#directory-province").value = draft.directoryProvince || customRegions[0] || "安徽";
+    $("#directory-province").value = draft.directoryProvince || customRegions[0] || "";
   }
   setCheckedValues("sector", draft.sectors || []);
   setCheckedValues("noticeType", draft.noticeTypes || []);
@@ -1809,9 +1826,11 @@ function buildMonitorPayload() {
 function updateDirectoryScopeNote() {
   const province = $("#directory-province")?.value || "";
   const cityCount = state.provinceCities[province]?.length || 0;
+  const provinceCount = Number(state.provinceCoverage.provinceCount || Object.keys(state.provinceCities).length || 0);
+  const searchUnitCount = Number(state.provinceCoverage.searchUnitCount || Object.values(state.provinceCities).reduce((total, cities) => total + cities.length, 0));
   $("#directory-scope-note").textContent = province
-    ? `${province}包含 ${cityCount} 个地级行政区。系统会逐城检索，并跨关键词、跨地图平台自动合并重复企业。`
-    : "选择后会自动逐个扫描该省所有地级市，并将重复企业合并成一份名录。";
+    ? `${province}包含 ${cityCount} 个逐城检索单元。系统会逐一检索，并跨关键词、跨地图平台自动合并重复企业。`
+    : `已覆盖全国 ${provinceCount} 个省级行政区、${searchUnitCount} 个逐城检索单元。请选择任意省份开始普查。`;
 }
 
 function setDirection(direction) {
@@ -1840,7 +1859,7 @@ function setDirection(direction) {
       ? "监控主题"
       : "下游行业";
   $("#direction-note").textContent = directory
-    ? "锁定一个省份，自动展开全部地级市，汇总具体企业名称、公开电话、地址和地图来源。"
+    ? "覆盖全国全部省级行政区；选择任意省份后自动展开所属地市，汇总企业名称、公开电话、地址和地图来源。"
     : social
     ? "选择平台、地区和业务主题即可直接检索；公开链接只是可选补充。"
     : competitor
@@ -1877,7 +1896,7 @@ function setDirection(direction) {
   $("#api-status").hidden = procurement || environmental || competitor || social;
   $("#only-phone").checked = !directory && !upstream && !procurement && !environmental && !competitor && !social;
   $("#result-title").textContent = directory
-    ? "省级行业企业名录"
+    ? "全国分省企业名录"
     : social
     ? "社媒公开线索"
     : competitor
@@ -2060,7 +2079,7 @@ async function runSearch(mode = "amap") {
   const scope = mode === "amap" && payload.fastMode ? "快速模式" : "全面模式";
   setNotice(
     state.direction === "directory"
-      ? `正在逐城扫描${payload.directoryProvince}的 ${state.provinceCities[payload.directoryProvince]?.length || 0} 个地级行政区，并自动合并重复企业。`
+      ? `正在逐城扫描${payload.directoryProvince}的 ${state.provinceCities[payload.directoryProvince]?.length || 0} 个检索单元，并自动合并重复企业。`
       : state.direction === "social"
       ? "正在识别导入链接，并按平台检索公开索引。"
       : state.direction === "competitor"
@@ -2605,7 +2624,7 @@ async function saveMonitor(event) {
   const button = $("#monitor-form button[type='submit']");
   const payload = buildMonitorPayload();
   if (payload.direction === "directory" && !state.provinceCities[payload.directoryProvince]) {
-    setNotice("省级名录监控需要填写一个有效省份，例如：安徽。", true);
+    setNotice("分省名录监控需要填写一个有效省份，例如：山东、广东或新疆。", true);
     return;
   }
   if (!payload.sectors.length) {
@@ -3001,7 +3020,7 @@ function bindEvents() {
     const direction = $("#monitor-direction").value;
     renderMonitorSectors(direction);
     if (direction === "directory" && !$("#monitor-regions").value.trim()) {
-      $("#monitor-regions").value = $("#directory-province").value || "安徽";
+      $("#monitor-regions").value = $("#directory-province").value || "";
       renderMonitorRegions([]);
     }
     if (!$("#monitor-name").value.trim() || DIRECTION_ORDER.some((item) => $("#monitor-name").value === `${DIRECTION_LABELS[item]}监控`)) {

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>氯化钙产业线索采集器</title>
-    <link rel="stylesheet" href="/styles.css?v=province-directory-1" />
+    <link rel="stylesheet" href="/styles.css?v=national-directory-1" />
   </head>
   <body>
     <div class="app">
@@ -28,7 +28,7 @@
               </label>
               <label>
                 <input type="radio" name="direction" value="directory" />
-                <span>省级行业企业名录</span>
+                <span>全国分省企业名录</span>
               </label>
               <label>
                 <input type="radio" name="direction" value="upstream" />
@@ -93,7 +93,7 @@
           </section>
 
           <section id="directory-scope-section" hidden>
-            <div class="section-title">锁定一个省份</div>
+            <div class="section-title">全国分省普查</div>
             <label class="field">
               <span>省级行政区</span>
               <select id="directory-province" aria-label="省级行政区">
@@ -101,7 +101,7 @@
               </select>
             </label>
             <div id="directory-scope-note" class="direction-note">
-              选择后会自动逐个扫描该省所有地级市，并将重复企业合并成一份名录。
+              支持全国全部省级行政区。选择任意省份后，系统会逐城扫描并合并重复企业。
             </div>
           </section>
 
@@ -366,8 +366,8 @@
         <section id="directory-summary" class="directory-summary" hidden aria-live="polite">
           <div class="directory-summary-head">
             <div>
-              <span class="directory-kicker">省级普查结果</span>
-              <h3 id="directory-summary-title">省级行业企业名录</h3>
+              <span class="directory-kicker">全国分省普查结果</span>
+              <h3 id="directory-summary-title">全国分省企业名录</h3>
               <p id="directory-summary-note">逐城扫描公开地图企业信息，并跨来源自动去重。</p>
             </div>
             <button id="directory-clear-city" class="secondary" type="button" hidden>查看全省</button>
@@ -919,6 +919,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=province-directory-1"></script>
+    <script src="/app.js?v=national-directory-1"></script>
   </body>
 </html>
