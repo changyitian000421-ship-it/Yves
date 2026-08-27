@@ -1527,7 +1527,12 @@ function renderSystem() {
         ? `已配置 · 今日 ${data.baiduSearchUsageToday || 0}/${data.baiduSearchDailyLimit || 45}`
         : "未配置",
     ],
-    ["Brave 官网发现", data.braveSearchConfigured ? "已配置 · 含每月免费保护" : "未配置"],
+    [
+      "Brave 补充官网发现",
+      data.braveSearchConfigured
+        ? "已配置 · 与千帆共同工作 · 含每月免费保护"
+        : "未配置",
+    ],
     ["Hunter 企业邮箱", data.hunterConfigured ? "已配置 · 自动补全公开邮箱" : "未配置"],
     ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
   ].map(([label, value]) => `

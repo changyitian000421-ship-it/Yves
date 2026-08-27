@@ -614,6 +614,219 @@ class LiquidCalciumAppTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(cached_count, 0)
 
+    @patch("app.brave_web_search")
+    @patch("app.qianfan_web_search")
+    @patch("app.brave_search_api_key", return_value="private-brave-key")
+    @patch("app.baidu_search_api_key", return_value="private-qianfan-key")
+    def test_public_web_search_merges_qianfan_primary_and_brave_supplement(
+        self,
+        _baidu_key,
+        _brave_key,
+        qianfan_search,
+        brave_search,
+    ):
+        qianfan_search.return_value = [
+            {
+                "title": "千帆主结果",
+                "url": "https://www.example.com/about/?utm_source=qianfan",
+                "description": "主源",
+                "provider": "百度千帆网页搜索",
+            },
+            {
+                "title": "千帆独有结果",
+                "url": "https://primary.example.com/contact",
+                "description": "主源独有",
+                "provider": "百度千帆网页搜索",
+            },
+        ]
+        brave_search.return_value = [
+            {
+                "title": "Brave 重复结果",
+                "url": "https://example.com/about?utm_medium=brave",
+                "description": "补充源重复网址",
+                "provider": "Brave Search 官网发现",
+            },
+            {
+                "title": "Brave 补充结果",
+                "url": "https://supplement.example.com/contact",
+                "description": "补充源独有",
+                "provider": "Brave Search 官网发现",
+            },
+        ]
+
+        results, _ = app.search_public_web(
+            "测试企业 官方网站 联系我们",
+            10,
+            allow_brave=True,
+        )
+
+        self.assertEqual(
+            [result["title"] for result in results],
+            ["千帆主结果", "千帆独有结果", "Brave 补充结果"],
+        )
+        self.assertEqual(
+            [result["provider"] for result in results],
+            ["百度千帆网页搜索", "百度千帆网页搜索", "Brave Search 官网发现"],
+        )
+        qianfan_search.assert_called_once_with(
+            "private-qianfan-key",
+            "测试企业 官方网站 联系我们",
+            10,
+        )
+        brave_search.assert_called_once_with(
+            "private-brave-key",
+            "测试企业 官方网站 联系我们",
+            5,
+        )
+
+    @patch("app.brave_web_search")
+    @patch("app.qianfan_web_search")
+    @patch("app.brave_search_api_key", return_value="private-brave-key")
+    @patch("app.baidu_search_api_key", return_value="private-qianfan-key")
+    def test_qianfan_cache_does_not_disable_brave_supplement(
+        self,
+        _baidu_key,
+        _brave_key,
+        qianfan_search,
+        brave_search,
+    ):
+        qianfan_search.return_value = [
+            {
+                "title": "千帆缓存结果",
+                "url": "https://primary.example.com/",
+                "description": "主源",
+                "provider": "百度千帆网页搜索",
+            }
+        ]
+        brave_search.return_value = [
+            {
+                "title": "Brave 每次补充",
+                "url": "https://supplement.example.com/",
+                "description": "补充源",
+                "provider": "Brave Search 官网发现",
+            }
+        ]
+
+        first, _ = app.search_public_web("双源缓存测试 官网", 10, allow_brave=True)
+        second, _ = app.search_public_web("双源缓存测试 官网", 10, allow_brave=True)
+
+        self.assertEqual(first, second)
+        self.assertEqual(qianfan_search.call_count, 1)
+        self.assertEqual(brave_search.call_count, 2)
+        with app.database_connection() as connection:
+            brave_cache_count = connection.execute(
+                "SELECT COUNT(*) FROM web_search_cache WHERE provider = 'brave_search'"
+            ).fetchone()[0]
+        self.assertEqual(brave_cache_count, 0)
+
+    @patch("app.brave_web_search", side_effect=RuntimeError("Brave 临时不可用"))
+    @patch("app.qianfan_web_search")
+    @patch("app.brave_search_api_key", return_value="private-brave-key")
+    @patch("app.baidu_search_api_key", return_value="private-qianfan-key")
+    def test_brave_supplement_failure_keeps_qianfan_primary_results(
+        self,
+        _baidu_key,
+        _brave_key,
+        qianfan_search,
+        _brave_search,
+    ):
+        qianfan_search.return_value = [
+            {
+                "title": "千帆仍可用",
+                "url": "https://primary.example.com/",
+                "description": "主源",
+                "provider": "百度千帆网页搜索",
+            }
+        ]
+
+        results, _ = app.search_public_web("单源失败测试 官网", 10, allow_brave=True)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["provider"], "百度千帆网页搜索")
+
+    @patch("app.fetch_html")
+    def test_brave_supplement_is_rebuilt_from_original_page(self, fetch_html):
+        fetch_html.return_value = """
+        <html>
+          <head><title>测试环保企业官方网站</title></head>
+          <body>山东测试环保有限公司公开含氟废水治理和环评审批信息。</body>
+        </html>
+        """
+        results = [
+            {
+                "title": "千帆主结果",
+                "url": "https://primary.example.com/",
+                "description": "千帆证据",
+                "provider": "百度千帆网页搜索",
+            },
+            {
+                "title": "Brave API 标题不应直接保存",
+                "url": "https://supplement.example.com/environment",
+                "description": "Brave API 摘要不应直接保存",
+                "provider": "Brave Search 官网发现",
+            },
+        ]
+
+        verified = app.verify_brave_original_pages(
+            results,
+            "山东 含氟废水 环评 企业",
+        )
+
+        self.assertEqual(len(verified), 2)
+        self.assertEqual(verified[0], results[0])
+        self.assertEqual(verified[1]["provider"], "Brave Search 原页核验")
+        self.assertEqual(verified[1]["title"], "测试环保企业官方网站")
+        self.assertIn("含氟废水治理", verified[1]["description"])
+        self.assertNotIn("API 摘要", str(verified[1]))
+
+    @patch("app.fetch_html", side_effect=RuntimeError("目标网页不可访问"))
+    def test_unverified_brave_supplement_is_discarded(self, _fetch_html):
+        results = [
+            {
+                "title": "千帆主结果",
+                "url": "https://primary.example.com/",
+                "description": "千帆证据",
+                "provider": "百度千帆网页搜索",
+            },
+            {
+                "title": "Brave 未核验结果",
+                "url": "https://blocked.example.com/",
+                "description": "不可直接保存",
+                "provider": "Brave Search 官网发现",
+            },
+        ]
+
+        verified = app.verify_brave_original_pages(results, "测试企业")
+
+        self.assertEqual(verified, [results[0]])
+
+    @patch("app.fetch_html")
+    def test_brave_directory_is_blocked_unless_query_targets_that_site(
+        self,
+        fetch_html,
+    ):
+        result = {
+            "title": "企业黄页",
+            "url": "https://www.chinabgao.com/company/example",
+            "description": "聚合信息",
+            "provider": "Brave Search 官网发现",
+        }
+
+        ordinary = app.verify_brave_original_pages([result], "测试企业 官网")
+
+        self.assertEqual(ordinary, [])
+        fetch_html.assert_not_called()
+
+        fetch_html.return_value = "<title>行业站原页</title><p>测试企业公开产品页面</p>"
+        targeted = app.verify_brave_original_pages(
+            [result],
+            "site:chinabgao.com 测试企业",
+        )
+
+        self.assertEqual(len(targeted), 1)
+        self.assertEqual(targeted[0]["provider"], "Brave Search 原页核验")
+        fetch_html.assert_called_once()
+
     @patch("app.qianfan_web_search")
     def test_public_web_search_caches_qianfan_results(self, qianfan_search):
         qianfan_search.return_value = [

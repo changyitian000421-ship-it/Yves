@@ -39,7 +39,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from html.parser import HTMLParser
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -136,6 +136,33 @@ BRAVE_SEARCH_DAILY_LIMIT = env_bounded_int(
     1_000,
 )
 BRAVE_SEARCH_MONTHLY_FREE_LIMIT = 1_000
+BRAVE_DIRECTORY_HOST_MARKERS = (
+    "qcc.com",
+    "tianyancha.com",
+    "baidu.com",
+    "so.com",
+    "sogou.com",
+    "b2b",
+    "1688.com",
+    "huangye88.com",
+    "11467.com",
+    "chinapp.com",
+    "chinabgao.com",
+    "7icp.com",
+    "qichaxun.com",
+    "16ds.com",
+    "lookchem.cn",
+    "chinacem.net",
+    "cbi360.net",
+    "chemnet.com",
+    "made-in-china.com",
+    "zhipin.com",
+    "liepin.com",
+    "51job.com",
+    "jobui.com",
+    "kanzhun.com",
+    "shuididp.cn",
+)
 HUNTER_DOMAIN_SEARCH_ENDPOINT = "https://api.hunter.io/v2/domain-search"
 HUNTER_DAILY_LIMIT = env_bounded_int(
     "HUNTER_DAILY_LIMIT",
@@ -154,7 +181,7 @@ API_PROVIDERS = {
     },
     "brave_search": {
         "label": "Brave Search",
-        "category": "企业官网发现",
+        "category": "千帆补充 · 官网发现",
         "defaultLimit": BRAVE_SEARCH_DAILY_LIMIT,
         "monthlyFreeLimit": BRAVE_SEARCH_MONTHLY_FREE_LIMIT,
     },
@@ -216,7 +243,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v12.2-global-enrichment"
+APP_VERSION = "liquid-calcium-ops-v12.3-dual-web-search"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -6700,46 +6727,220 @@ def parse_360_environmental_results(page: str) -> list[dict[str, str]]:
     return results
 
 
+def normalized_search_result_url(value: str) -> str:
+    parsed = urlparse(str(value or "").strip())
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if not host:
+        return ""
+    path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
+    tracking_keys = {
+        "from",
+        "gclid",
+        "fbclid",
+        "ref",
+        "referrer",
+        "source",
+        "spm",
+    }
+    query_items = sorted(
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in tracking_keys
+        and not key.lower().startswith("utm_")
+    )
+    query = urlencode(query_items)
+    return f"{host}{path}{'?' + query if query else ''}"
+
+
+def merge_web_search_results(
+    primary: list[dict[str, str]],
+    supplement: list[dict[str, str]],
+    top_k: int,
+) -> list[dict[str, str]]:
+    primary_limit = max(1, int(top_k))
+    supplement_limit = primary_limit if not primary else min(5, primary_limit)
+    merged: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def append_unique(result: dict[str, str]) -> bool:
+        identity = normalized_search_result_url(result.get("url", ""))
+        if not identity or identity in seen_urls:
+            return False
+        seen_urls.add(identity)
+        merged.append(result)
+        return True
+
+    primary_added = 0
+    for result in primary:
+        if primary_added >= primary_limit:
+            break
+        if append_unique(result):
+            primary_added += 1
+
+    supplement_added = 0
+    for result in supplement:
+        if supplement_added >= supplement_limit:
+            break
+        if append_unique(result):
+            supplement_added += 1
+    return merged
+
+
+def original_page_search_excerpt(text: str, query: str, limit: int = 360) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if not compact:
+        return ""
+    terms = [
+        term
+        for term in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{3,}", query or "")
+        if term.lower() not in {"site", "http", "https", "www", "com", "cn"}
+    ]
+    positions = [
+        compact.lower().find(term.lower())
+        for term in terms
+        if compact.lower().find(term.lower()) >= 0
+    ]
+    start = max(0, min(positions) - 90) if positions else 0
+    return compact[start : start + max(80, int(limit))]
+
+
+def brave_original_page_allowed(url: str, query: str) -> bool:
+    host = (urlparse(str(url or "")).hostname or "").lower()
+    if not host:
+        return False
+    _, selected_sites = split_search_site_filters(query)
+    if selected_sites:
+        return any(
+            host == site or host.endswith(f".{site}")
+            for site in selected_sites
+        )
+    return not any(marker in host for marker in BRAVE_DIRECTORY_HOST_MARKERS)
+
+
+def verify_brave_original_pages(
+    results: list[dict[str, str]],
+    query: str,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    brave_indexes = {
+        index
+        for index, result in enumerate(results)
+        if result.get("provider") == "Brave Search 官网发现"
+    }
+    if not brave_indexes:
+        return results
+    candidates = [
+        (index, result)
+        for index, result in enumerate(results)
+        if index in brave_indexes
+        and brave_original_page_allowed(result.get("url", ""), query)
+    ][: max(0, int(limit))]
+    if not candidates:
+        return [
+            result
+            for index, result in enumerate(results)
+            if index not in brave_indexes
+        ]
+
+    def verify_candidate(
+        item: tuple[int, dict[str, str]],
+    ) -> tuple[int, dict[str, str] | None]:
+        index, result = item
+        url = str(result.get("url") or "")
+        try:
+            page = fetch_html(url, timeout=12)
+            page_text = visible_html_text(page)
+        except Exception:  # noqa: BLE001 - unverified API-only URLs are discarded.
+            return index, None
+        description = original_page_search_excerpt(page_text, query)
+        if not description:
+            return index, None
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
+        host = (urlparse(url).hostname or "").removeprefix("www.")
+        title = html_text(title_match.group(1)) if title_match else host
+        return (
+            index,
+            {
+                "title": title or host,
+                "url": url,
+                "description": description,
+                "date": "",
+                "website": host,
+                "provider": "Brave Search 原页核验",
+            },
+        )
+
+    verified: dict[int, dict[str, str]] = {}
+    with ThreadPoolExecutor(max_workers=min(3, len(candidates))) as executor:
+        futures = [executor.submit(verify_candidate, item) for item in candidates]
+        for future in as_completed(futures):
+            index, result = future.result()
+            if result:
+                verified[index] = result
+
+    prepared: list[dict[str, str]] = []
+    for index, result in enumerate(results):
+        if result.get("provider") != "Brave Search 官网发现":
+            prepared.append(result)
+        elif index in verified:
+            prepared.append(verified[index])
+    return prepared
+
+
 def search_public_web(
     query: str,
     top_k: int = 12,
     *,
     allow_brave: bool = False,
 ) -> tuple[list[dict[str, str]], str]:
-    """Search Qianfan first, optionally using Brave only for URL discovery."""
+    """Use Qianfan as the primary source and Brave as verified URL discovery."""
     normalized_query = truncate_baidu_search_query(query)
     if not normalized_query:
         return [], ""
     manual_url = "https://www.baidu.com/s?" + urlencode({"wd": normalized_query})
     api_key = baidu_search_api_key()
     provider_errors: list[str] = []
+    qianfan_results: list[dict[str, str]] = []
     if api_key:
         cache_key = web_search_cache_key(normalized_query, top_k)
         cached = cached_web_search(cache_key)
         if cached is not None:
-            if cached:
-                return cached, manual_url
+            qianfan_results = cached
         else:
             try:
                 reserve_qianfan_search_request()
-                results = qianfan_web_search(api_key, normalized_query, top_k)
-                store_web_search_cache(cache_key, normalized_query, results)
-                if results:
-                    return results, manual_url
+                qianfan_results = qianfan_web_search(
+                    api_key,
+                    normalized_query,
+                    top_k,
+                )
+                store_web_search_cache(
+                    cache_key,
+                    normalized_query,
+                    qianfan_results,
+                )
             except Exception as exc:  # noqa: BLE001 - retain public fallback.
                 provider_errors.append(str(exc))
-                print(f"WARNING: {exc}; falling back to public index.", flush=True)
+                print(f"WARNING: {exc}; continuing with other web sources.", flush=True)
 
     brave_key = brave_search_api_key()
+    brave_results: list[dict[str, str]] = []
     if allow_brave and brave_key:
         try:
             reserve_brave_search_request()
-            brave_results = brave_web_search(brave_key, query, top_k)
-            if brave_results:
-                return brave_results, manual_url
+            brave_limit = top_k if not qianfan_results else min(5, top_k)
+            brave_results = brave_web_search(brave_key, query, brave_limit)
         except Exception as exc:  # noqa: BLE001 - retain public fallback.
             provider_errors.append(str(exc))
-            print(f"WARNING: {exc}; falling back to public index.", flush=True)
+            print(f"WARNING: {exc}; continuing with other web sources.", flush=True)
+
+    merged_results = merge_web_search_results(
+        qianfan_results,
+        brave_results,
+        top_k,
+    )
+    if merged_results:
+        return merged_results, manual_url
 
     fallback_url = "https://www.so.com/s?" + urlencode({"q": normalized_query})
     try:
@@ -7003,8 +7204,8 @@ def collect_competitor_intelligence(
             "厂家 供应商 应用 客户 案例",
         ]
         query = " ".join(part for part in query_parts if part)
-        results, query_url = search_public_web(query, top_k=16)
-        return job, results, query_url
+        results, query_url = search_public_web(query, top_k=16, allow_brave=True)
+        return job, verify_brave_original_pages(results, query), query_url
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -7012,7 +7213,7 @@ def collect_competitor_intelligence(
             source_id, source, region, keyword, sector = futures[future]
             try:
                 _, results, query_url = future.result()
-                for result in results[:12]:
+                for result in results[:20]:
                     evidence_text = f"{result['title']} {result['description']}"
                     if "氯化钙" not in evidence_text:
                         continue
@@ -7296,8 +7497,8 @@ def collect_environmental_documents(
     def fetch_job(job: tuple[str, str, str, str]) -> tuple[tuple[str, str, str, str], list[dict[str, str]]]:
         source_id, source_term, region, keyword = job
         query = f"{region} {keyword} 氟化物 含氟废水 {source_term} 企业"
-        results, _ = search_public_web(query, top_k=20)
-        return job, results
+        results, _ = search_public_web(query, top_k=20, allow_brave=True)
+        return job, verify_brave_original_pages(results, query)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -8835,7 +9036,8 @@ def collect_social_leads(
     def fetch_job(job: tuple[str, dict[str, Any], str, str]) -> tuple[list[dict[str, str]], str]:
         _, platform, region, keyword = job
         query = f"site:{platform['search_domain']} {region} {keyword}"
-        return search_public_web(query, top_k=12)
+        results, query_url = search_public_web(query, top_k=12, allow_brave=True)
+        return verify_brave_original_pages(results, query), query_url
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_job, job): job for job in jobs}
@@ -8844,7 +9046,7 @@ def collect_social_leads(
             try:
                 results, query_url = future.result()
                 request_count += 1
-                for result in results[:10]:
+                for result in results[:15]:
                     result_platform_id, _ = identify_social_platform(result["url"])
                     if result_platform_id != platform_id:
                         continue
