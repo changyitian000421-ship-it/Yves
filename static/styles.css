@@ -3174,7 +3174,7 @@ th {
 
 .api-usage-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 9px;
 }
 
@@ -3249,6 +3249,29 @@ th {
   border-radius: inherit;
   background: #2f7d4b;
   transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.api-usage-monthly {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid #e6ebe8;
+  color: #56636c;
+  font-size: 10px;
+}
+
+.api-usage-monthly strong {
+  color: #27323a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.api-usage-track.monthly-track {
+  height: 4px;
+  margin-top: 5px;
 }
 
 .api-usage-item.status-warning .api-usage-item-head em,

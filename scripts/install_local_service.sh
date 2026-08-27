@@ -12,7 +12,9 @@ mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR" "$ROOT/data" "$APP_SUPPORT_DIR"
 chmod +x \
   "$ROOT/scripts/start_local_service.sh" \
   "$ROOT/scripts/repair_local_service.sh" \
-  "$ROOT/scripts/configure_baidu_search.sh"
+  "$ROOT/scripts/configure_baidu_search.sh" \
+  "$ROOT/scripts/configure_brave_search.sh" \
+  "$ROOT/scripts/configure_hunter.sh"
 if [[ -f "$ROOT/data/local.env" && ! -f "$APP_SUPPORT_ENV" ]]; then
   cp "$ROOT/data/local.env" "$APP_SUPPORT_ENV"
   chmod 600 "$APP_SUPPORT_ENV"

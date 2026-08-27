@@ -12,7 +12,10 @@
 - 省级结果按城市统计，可点击城市筛选、查看联系方式覆盖率，并按当前筛选导出；无公开电话的真实企业也会保留
 - 内置污水处理厂、工业园区污水厂、自来水厂、危废固废、垃圾焚烧、环保服务、化工和制药等省级名录模板
 - 支持高德、百度和天地图服务端 API，自动采集企业名称、电话、地址并跨来源合并
-- 首页醒目显示百度千帆、高德、百度地图、天地图和短信服务的今日用量、总量、余量与分级预警
+- 首页醒目显示百度千帆、Brave Search、Hunter、高德、百度地图、天地图和短信服务的今日用量、总量、余量与分级预警
+- Brave Search 作为企业官网发现回退源；候选官网必须再次打开原页面核验后才会写入线索，不保存 Brave 搜索摘要
+- Hunter 自动为每次采集中最高优先级且缺邮箱的少量企业补全带公开来源页面的企业邮箱，相同企业缓存 30 天
+- Brave 每月最多 1000 次、Hunter 每月最多 50 次的免费保护上限写死在程序中，到顶自动停止，页面只能调整更细的每日额度
 - 按氯化钙应用场景自动评分，比如融雪剂、干燥剂、水处理、钻井液、混凝土外加剂、冷库制冷、化工贸易
 - 支持 4 路并发采集和快速模式，减少批量查询等待时间
 - 实时显示采集百分比、请求进度、企业数量和含电话数量
@@ -98,6 +101,8 @@ AMAP_KEY=你的高德Web服务Key \
 BAIDU_MAP_AK=你的百度地图服务端AK \
 TIANDITU_TK=你的天地图服务端TK \
 BAIDU_SEARCH_API_KEY=你的百度千帆API_Key \
+BRAVE_SEARCH_API_KEY=你的Brave_Search_API_Key \
+HUNTER_API_KEY=你的Hunter_API_Key \
 SESSION_SECRET=一段随机长字符串 \
 SMS_DEV_MODE=1 \
 DATA_DIR=./data \
@@ -169,6 +174,17 @@ http://127.0.0.1:8765
 系统默认缓存相同查询 7 天，并将千帆调用保护在每天 45 次以内。
 可通过 `BAIDU_SEARCH_CACHE_DAYS` 和 `BAIDU_SEARCH_DAILY_LIMIT` 调整。
 
+Brave Search 和 Hunter 可通过安全脚本配置：
+
+```bash
+./scripts/configure_brave_search.sh
+./scripts/configure_hunter.sh
+```
+
+Brave 只用于发现企业官网，系统会访问原官网核验企业名称后再保存网址；
+Hunter 只保存带公开来源页面的企业邮箱。精准、均衡、广覆盖策略每次最多分别核验
+2、3、5 家缺少邮箱的高优先级企业，避免一次采集耗尽额度。
+
 ## API 用量提醒
 
 首页“API 用量中心”按实际发出的请求计数，网络重试也会计入。点击“设置每日总量”，
@@ -179,9 +195,11 @@ http://127.0.0.1:8765
 - 达到 90%：红色提醒
 - 达到 100%：额度已用完
 
-百度千帆默认每日保护上限为 45 次；其他平台的总量因账号套餐不同，需要在页面中填写。
+百度千帆默认每日保护上限为 45 次；Brave 默认每天 30 次且每月硬上限 1000 次，
+Hunter 默认每天 5 次且每月硬上限 50 次。其他平台的总量因账号套餐不同，需要在页面中填写。
 也可以通过 `AMAP_DAILY_LIMIT`、`BAIDU_MAP_DAILY_LIMIT`、
-`TIANDITU_DAILY_LIMIT` 和 `ALIYUN_SMS_DAILY_LIMIT` 提供初始默认值。
+`TIANDITU_DAILY_LIMIT`、`ALIYUN_SMS_DAILY_LIMIT`、`BRAVE_SEARCH_DAILY_LIMIT`
+和 `HUNTER_DAILY_LIMIT` 提供初始默认值。
 页面保存的额度和每日用量会写入当前数据库；Render 使用 Turso 时可跨重启保留。
 后续新增 API 平台只需在统一平台清单中登记，即可复用同一套计数和提醒界面。
 
@@ -194,7 +212,8 @@ http://127.0.0.1:8765
 3. 填写环境变量 `APP_PASSWORD`、`LOGIN_PHONES`，并至少配置
    `AMAP_KEY`、`BAIDU_MAP_AK` 或 `TIANDITU_TK`；配置多个 Key 时会并行采集并合并结果。
    如需稳定的官网、环评、竞品和社媒公开页面检索，再填写
-   `BAIDU_SEARCH_API_KEY`。
+   `BAIDU_SEARCH_API_KEY`；如需备用官网发现和公开企业邮箱补全，再填写
+   `BRAVE_SEARCH_API_KEY`、`HUNTER_API_KEY`。
    如需云端长期保存线索，再填写 `TURSO_DATABASE_URL` 和 `TURSO_AUTH_TOKEN`。
 4. `SESSION_SECRET` 会由 Render 自动生成。
 5. 开通阿里云“号码认证服务 > 短信认证”，配置：

@@ -37,6 +37,8 @@ const state = {
   hasEnvBaiduMapAk: false,
   hasEnvTiandituTk: false,
   hasEnvBaiduSearchApiKey: false,
+  hasEnvBraveSearchApiKey: false,
+  hasEnvHunterApiKey: false,
   tursoConfigured: false,
   collectionStrategy: "precision",
   directoryCityFilter: "",
@@ -976,6 +978,8 @@ async function fetchConfig() {
   state.hasEnvBaiduMapAk = Boolean(config.hasEnvBaiduMapAk);
   state.hasEnvTiandituTk = Boolean(config.hasEnvTiandituTk);
   state.hasEnvBaiduSearchApiKey = Boolean(config.hasEnvBaiduSearchApiKey);
+  state.hasEnvBraveSearchApiKey = Boolean(config.hasEnvBraveSearchApiKey);
+  state.hasEnvHunterApiKey = Boolean(config.hasEnvHunterApiKey);
   state.tursoConfigured = Boolean(config.tursoConfigured);
   const provinceSelect = $("#directory-province");
   if (provinceSelect) {
@@ -1045,10 +1049,10 @@ function renderApiUsage(items) {
   panel.classList.toggle("is-critical", urgent.length > 0);
   panel.classList.toggle("is-warning", !urgent.length && attention.length > 0);
 
-  let headline = `本系统今日：${configured.length} 个平台已接入，用量正常`;
+  let headline = `本系统 API：${configured.length} 个平台已接入，用量正常`;
   if (!configured.length) headline = "尚未接入平台 API";
-  else if (urgent.length) headline = `本系统今日：${urgent.length} 个平台额度即将或已经用完`;
-  else if (attention.length) headline = `本系统今日：${attention.length} 个平台需要关注额度`;
+  else if (urgent.length) headline = `${urgent.length} 个平台额度即将或已经用完`;
+  else if (attention.length) headline = `${attention.length} 个平台需要关注额度`;
   $("#api-usage-headline").textContent = headline;
 
   $("#api-usage-grid").innerHTML = items.map((item) => {
@@ -1056,6 +1060,16 @@ function renderApiUsage(items) {
     const remaining = item.remaining === null
       ? "设置总量后显示余量"
       : `剩余 ${Number(item.remaining).toLocaleString("zh-CN")} 次`;
+    const monthlyGuard = item.hardFreeLimit ? `
+      <div class="api-usage-monthly">
+        <span>本月免费保护</span>
+        <strong>${Number(item.monthlyUsed || 0).toLocaleString("zh-CN")} / ${Number(item.monthlyLimit || 0).toLocaleString("zh-CN")}</strong>
+      </div>
+      <div class="api-usage-track monthly-track" role="progressbar" aria-label="${escapeHtml(item.label)}本月免费额度用量" aria-valuenow="${Number(item.monthlyPercent || 0)}" aria-valuemin="0" aria-valuemax="100">
+        <i style="width:${Math.max(0, Math.min(100, Number(item.monthlyPercent || 0)))}%"></i>
+      </div>
+      <small>本月剩余 ${Number(item.monthlyRemaining || 0).toLocaleString("zh-CN")} 次，达到上限自动停止</small>
+    ` : "";
     return `
       <article class="api-usage-item status-${escapeHtml(item.status)}">
         <div class="api-usage-item-head">
@@ -1067,12 +1081,13 @@ function renderApiUsage(items) {
         </div>
         <div class="api-usage-numbers">
           <b>${Number(item.used || 0).toLocaleString("zh-CN")}</b>
-          <span>/ ${total}</span>
+          <span>/ ${total} 今日</span>
         </div>
         <div class="api-usage-track" role="progressbar" aria-label="${escapeHtml(item.label)}今日用量" aria-valuenow="${Number(item.percent || 0)}" aria-valuemin="0" aria-valuemax="100">
           <i style="width:${Math.max(0, Math.min(100, Number(item.percent || 0)))}%"></i>
         </div>
         <small>${escapeHtml(remaining)}</small>
+        ${monthlyGuard}
       </article>
     `;
   }).join("");
@@ -1086,6 +1101,9 @@ function openApiQuotaDialog() {
         data-api-provider="${escapeHtml(item.provider)}"
         value="${Number(item.limit || 0)}" />
       <small>今日已用 ${Number(item.used || 0).toLocaleString("zh-CN")} 次</small>
+      ${item.hardFreeLimit
+        ? `<small>本月免费保护 ${Number(item.monthlyUsed || 0).toLocaleString("zh-CN")}/${Number(item.monthlyLimit || 0).toLocaleString("zh-CN")} 次，此上限不可调高</small>`
+        : ""}
     </label>
   `).join("");
   showDialogSmooth($("#api-quota-dialog"));
@@ -1509,6 +1527,8 @@ function renderSystem() {
         ? `已配置 · 今日 ${data.baiduSearchUsageToday || 0}/${data.baiduSearchDailyLimit || 45}`
         : "未配置",
     ],
+    ["Brave 官网发现", data.braveSearchConfigured ? "已配置 · 含每月免费保护" : "未配置"],
+    ["Hunter 企业邮箱", data.hunterConfigured ? "已配置 · 自动补全公开邮箱" : "未配置"],
     ["短信认证", data.smsConfigured ? "已配置" : "未配置"],
   ].map(([label, value]) => `
     <div><span>${escapeHtml(value)}</span><p>${escapeHtml(label)}</p></div>
@@ -2273,7 +2293,11 @@ function applySearchResult(data) {
   const qualityText = state.leads.length
     ? ` 其中 A/B 级 ${Number(quality.gradeA || 0) + Number(quality.gradeB || 0)} 条，可立即跟进 ${quality.actionable || 0} 条。`
     : "";
-  setNotice(`${summary}${qualityText}${persistence}${warnings}`, Boolean(data.errors?.length && !state.leads.length));
+  const enrichment = data.meta?.contactEnrichment || {};
+  const enrichmentText = enrichment.configured && enrichment.checked
+    ? ` Hunter 已核验 ${enrichment.checked} 家，补全 ${enrichment.enriched || 0} 家公开企业邮箱。`
+    : "";
+  setNotice(`${summary}${qualityText}${enrichmentText}${persistence}${warnings}`, Boolean(data.errors?.length && !state.leads.length));
   loadDashboard().catch(() => {});
 }
 

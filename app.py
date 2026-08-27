@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import gzip
 import hashlib
 import hmac
 import html
@@ -127,12 +128,41 @@ BAIDU_SEARCH_DAILY_LIMIT = env_bounded_int(
     1,
     500,
 )
+BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+BRAVE_SEARCH_DAILY_LIMIT = env_bounded_int(
+    "BRAVE_SEARCH_DAILY_LIMIT",
+    30,
+    1,
+    1_000,
+)
+BRAVE_SEARCH_MONTHLY_FREE_LIMIT = 1_000
+HUNTER_DOMAIN_SEARCH_ENDPOINT = "https://api.hunter.io/v2/domain-search"
+HUNTER_DAILY_LIMIT = env_bounded_int(
+    "HUNTER_DAILY_LIMIT",
+    5,
+    1,
+    50,
+)
+HUNTER_MONTHLY_FREE_LIMIT = 50
+HUNTER_CACHE_DAYS = env_bounded_int("HUNTER_CACHE_DAYS", 30, 1, 90)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 API_PROVIDERS = {
     "baidu_qianfan": {
         "label": "百度千帆",
         "category": "公开搜索",
         "defaultLimit": BAIDU_SEARCH_DAILY_LIMIT,
+    },
+    "brave_search": {
+        "label": "Brave Search",
+        "category": "企业官网发现",
+        "defaultLimit": BRAVE_SEARCH_DAILY_LIMIT,
+        "monthlyFreeLimit": BRAVE_SEARCH_MONTHLY_FREE_LIMIT,
+    },
+    "hunter": {
+        "label": "Hunter 企业邮箱",
+        "category": "联系方式补全",
+        "defaultLimit": HUNTER_DAILY_LIMIT,
+        "monthlyFreeLimit": HUNTER_MONTHLY_FREE_LIMIT,
     },
     "amap": {
         "label": "高德地图",
@@ -186,7 +216,7 @@ DATABASE_LOCK = threading.RLock()
 MONITOR_WAKE_EVENT = threading.Event()
 MONITOR_RUNNING: set[int] = set()
 MONITOR_RUNNING_LOCK = threading.Lock()
-APP_VERSION = "liquid-calcium-ops-v12.1-national-directory"
+APP_VERSION = "liquid-calcium-ops-v12.2-global-enrichment"
 MAX_REQUEST_BODY = 5 * 1024 * 1024
 
 DIRECTION_LABELS = {
@@ -2798,6 +2828,8 @@ def system_overview() -> dict[str, Any]:
         "baiduMapConfigured": bool(os.getenv("BAIDU_MAP_AK")),
         "tiandituConfigured": bool(os.getenv("TIANDITU_TK")),
         "baiduSearchConfigured": bool(baidu_search_api_key()),
+        "braveSearchConfigured": bool(brave_search_api_key()),
+        "hunterConfigured": bool(hunter_api_key()),
         "baiduSearchUsageToday": qianfan_usage["used"],
         "baiduSearchDailyLimit": qianfan_usage["limit"],
         "smsConfigured": sms_configured() or SMS_DEV_MODE,
@@ -2850,6 +2882,10 @@ def health_status() -> dict[str, Any]:
         },
         "webSearchProviders": {
             "baiduQianfan": bool(baidu_search_api_key()),
+            "braveSearch": bool(brave_search_api_key()),
+        },
+        "contactProviders": {
+            "hunter": bool(hunter_api_key()),
         },
     }
 
@@ -5871,6 +5907,14 @@ def baidu_search_api_key() -> str:
     ).strip()
 
 
+def brave_search_api_key() -> str:
+    return str(os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
+
+
+def hunter_api_key() -> str:
+    return str(os.getenv("HUNTER_API_KEY") or "").strip()
+
+
 def truncate_baidu_search_query(value: str, limit: int = 72) -> str:
     """Keep queries within Baidu's one-byte ASCII/two-byte CJK search limit."""
     compact = re.sub(r"\s+", " ", value or "").strip()
@@ -6003,12 +6047,219 @@ def qianfan_web_search(
     return results
 
 
-def web_search_cache_key(query: str, top_k: int) -> str:
-    normalized_query, sites = split_search_site_filters(query)
+def brave_web_search(
+    api_key: str,
+    query: str,
+    top_k: int = 12,
+) -> list[dict[str, str]]:
+    if not api_key:
+        raise RuntimeError("未配置 BRAVE_SEARCH_API_KEY")
+    normalized_query = re.sub(r"\s+", " ", query or "").strip()[:400]
+    if not normalized_query:
+        return []
+    request_url = BRAVE_SEARCH_ENDPOINT + "?" + urlencode(
+        {
+            "q": normalized_query,
+            "count": max(1, min(int(top_k), 20)),
+            "country": "cn",
+            "search_lang": "zh-hans",
+            "safesearch": "moderate",
+        }
+    )
+    request = Request(
+        request_url,
+        headers={
+            "User-Agent": "CalciumLeads/1.0",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key,
+        },
+        method="GET",
+    )
+    try:
+        raw_payload = read_url_bytes(
+            request,
+            timeout=20,
+            attempts=2,
+            retry_callback=reserve_brave_search_request,
+        )
+        if raw_payload[:2] == b"\x1f\x8b":
+            raw_payload = gzip.decompress(raw_payload)
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(
+            f"Brave Search HTTP {exc.code}：{detail or exc.reason}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Brave Search 连接失败：{external_access_error_text(exc)}"
+        ) from exc
+
+    web_results = payload.get("web", {}).get("results")
+    if not isinstance(web_results, list):
+        return []
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for item in web_results:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append(
+            {
+                "title": str(item.get("title") or "").strip(),
+                "url": url,
+                "description": str(item.get("description") or "").strip(),
+                "date": str(item.get("page_age") or "").strip(),
+                "website": str(item.get("profile", {}).get("long_name") or "")
+                if isinstance(item.get("profile"), dict)
+                else "",
+                "provider": "Brave Search 官网发现",
+            }
+        )
+    return results
+
+
+def website_domain(value: str) -> str:
+    website = normalize_website(value)
+    host = (urlparse(website).hostname or "").lower().strip(".")
+    return host.removeprefix("www.")
+
+
+def hunter_domain_search(
+    api_key: str,
+    *,
+    company: str = "",
+    domain: str = "",
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    if not api_key:
+        raise RuntimeError("未配置 HUNTER_API_KEY")
+    normalized_domain = website_domain(domain) if domain else ""
+    normalized_company = re.sub(r"\s+", " ", company or "").strip()[:160]
+    if not normalized_domain and not normalized_company:
+        return []
+    parameters: dict[str, Any] = {
+        "limit": max(1, min(int(limit), 10)),
+    }
+    if normalized_domain:
+        parameters["domain"] = normalized_domain
+    else:
+        parameters["company"] = normalized_company
+    request = Request(
+        HUNTER_DOMAIN_SEARCH_ENDPOINT + "?" + urlencode(parameters),
+        headers={
+            "User-Agent": "CalciumLeads/1.0",
+            "Accept": "application/json",
+            "X-API-KEY": api_key,
+        },
+        method="GET",
+    )
+    try:
+        payload = json.loads(
+            read_url_bytes(
+                request,
+                timeout=20,
+                attempts=2,
+                retry_callback=reserve_hunter_request,
+            ).decode("utf-8")
+        )
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(
+            f"Hunter HTTP {exc.code}：{detail or exc.reason}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Hunter 连接失败：{external_access_error_text(exc)}"
+        ) from exc
+
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        first_error = errors[0] if isinstance(errors[0], dict) else {}
+        raise RuntimeError(
+            "Hunter 接口错误："
+            + str(first_error.get("details") or first_error.get("id") or errors[0])
+        )
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    result_domain = str(data.get("domain") or normalized_domain).strip().lower()
+    organization = str(data.get("organization") or normalized_company).strip()
+    emails = data.get("emails")
+    if not isinstance(emails, list):
+        return []
+    contacts: list[dict[str, Any]] = []
+    seen_emails: set[str] = set()
+    for item in emails:
+        if not isinstance(item, dict):
+            continue
+        email_value = str(item.get("value") or "").strip().lower()
+        if (
+            not re.fullmatch(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", email_value, re.I)
+            or email_value in seen_emails
+        ):
+            continue
+        source_urls = list(
+            dict.fromkeys(
+                str(source.get("uri") or "").strip()
+                for source in (item.get("sources") or [])
+                if isinstance(source, dict)
+                and str(source.get("uri") or "").strip().startswith(("http://", "https://"))
+            )
+        )
+        if not source_urls:
+            continue
+        seen_emails.add(email_value)
+        full_name = " ".join(
+            part
+            for part in [
+                str(item.get("first_name") or "").strip(),
+                str(item.get("last_name") or "").strip(),
+            ]
+            if part
+        )
+        contacts.append(
+            {
+                "email": email_value,
+                "type": str(item.get("type") or "").strip(),
+                "confidence": bounded_int(item.get("confidence"), 0, 0, 100),
+                "name": full_name,
+                "position": str(item.get("position") or "").strip(),
+                "domain": result_domain,
+                "organization": organization,
+                "sourceUrls": source_urls[:5],
+            }
+        )
+    return sorted(
+        contacts,
+        key=lambda item: (
+            item.get("type") == "generic",
+            int(item.get("confidence") or 0),
+        ),
+        reverse=True,
+    )[: max(1, min(int(limit), 10))]
+
+
+def web_search_cache_key(
+    query: str,
+    top_k: int,
+    provider: str = "baidu_qianfan",
+) -> str:
+    if provider == "baidu_qianfan":
+        normalized_query, sites = split_search_site_filters(query)
+        schema = "site-filter-v1"
+    else:
+        normalized_query = re.sub(r"\s+", " ", query or "").strip()[:240]
+        sites = []
+        schema = "normalized-v1"
     value = json.dumps(
         {
-            "provider": "baidu_qianfan",
-            "schema": "site-filter-v1",
+            "provider": provider,
+            "schema": schema,
             "query": normalized_query,
             "sites": sites,
             "topK": max(1, min(int(top_k), 50)),
@@ -6019,7 +6270,7 @@ def web_search_cache_key(query: str, top_k: int) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def cached_web_search(cache_key: str) -> list[dict[str, str]] | None:
+def cached_web_search(cache_key: str) -> list[dict[str, Any]] | None:
     now = datetime.now().isoformat(timespec="seconds")
     try:
         with DATABASE_LOCK, database_connection() as connection:
@@ -6049,7 +6300,10 @@ def cached_web_search(cache_key: str) -> list[dict[str, str]] | None:
 def store_web_search_cache(
     cache_key: str,
     query: str,
-    results: list[dict[str, str]],
+    results: list[dict[str, Any]],
+    *,
+    provider: str = "baidu_qianfan",
+    cache_days: int = BAIDU_SEARCH_CACHE_DAYS,
 ) -> None:
     now = datetime.now()
     try:
@@ -6059,15 +6313,16 @@ def store_web_search_cache(
                 INSERT OR REPLACE INTO web_search_cache
                     (cache_key, provider, query, payload, result_count,
                      created_at, expires_at)
-                VALUES (?, 'baidu_qianfan', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cache_key,
-                    truncate_baidu_search_query(query),
+                    provider,
+                    re.sub(r"\s+", " ", query or "").strip()[:240],
                     json.dumps(results, ensure_ascii=False),
                     len(results),
                     now.isoformat(timespec="seconds"),
-                    (now + timedelta(days=BAIDU_SEARCH_CACHE_DAYS)).isoformat(
+                    (now + timedelta(days=max(1, min(int(cache_days), 90)))).isoformat(
                         timespec="seconds"
                     ),
                 ),
@@ -6080,9 +6335,17 @@ def api_usage_date() -> str:
     return datetime.now(CHINA_TZ).date().isoformat()
 
 
+def api_usage_month_prefix() -> str:
+    return datetime.now(CHINA_TZ).strftime("%Y-%m")
+
+
 def api_provider_configured(provider: str) -> bool:
     if provider == "baidu_qianfan":
         return bool(baidu_search_api_key())
+    if provider == "brave_search":
+        return bool(brave_search_api_key())
+    if provider == "hunter":
+        return bool(hunter_api_key())
     if provider == "amap":
         return bool(os.getenv("AMAP_KEY"))
     if provider == "baidu_map":
@@ -6143,6 +6406,26 @@ def reserve_api_request(
             raise RuntimeError(
                 f"{label}已达到本地每日保护上限 {daily_limit} 次"
             )
+        monthly_limit = max(
+            0,
+            int(API_PROVIDERS[provider].get("monthlyFreeLimit") or 0),
+        )
+        if enforce_limit and monthly_limit > 0:
+            monthly_row = connection.execute(
+                """
+                SELECT COALESCE(SUM(request_count), 0) AS request_count
+                FROM api_usage
+                WHERE provider = ? AND usage_date LIKE ?
+                """,
+                (provider, f"{api_usage_month_prefix()}-%"),
+            ).fetchone()
+            monthly_used = int(monthly_row["request_count"]) if monthly_row else 0
+            if monthly_used + increment > monthly_limit:
+                label = str(API_PROVIDERS[provider]["label"])
+                raise RuntimeError(
+                    f"{label}已达到本月免费保护上限 {monthly_limit} 次，"
+                    "系统已停止继续调用以避免产生费用"
+                )
         connection.execute(
             """
             INSERT OR IGNORE INTO api_usage
@@ -6208,6 +6491,14 @@ def reserve_qianfan_search_request() -> None:
     reserve_api_request("baidu_qianfan", enforce_limit=True)
 
 
+def reserve_brave_search_request() -> None:
+    reserve_api_request("brave_search", enforce_limit=True)
+
+
+def reserve_hunter_request() -> None:
+    reserve_api_request("hunter", enforce_limit=True)
+
+
 def qianfan_search_usage_today() -> int:
     try:
         with DATABASE_LOCK, database_connection() as connection:
@@ -6243,15 +6534,28 @@ def api_usage_overview(
     connection: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     usage: dict[str, int] = {}
+    monthly_usage: dict[str, int] = {}
     limits: dict[str, int] = {}
     try:
         def read_usage(active_connection: Any) -> None:
-            nonlocal usage, limits
+            nonlocal usage, monthly_usage, limits
             usage = {
                 str(row["provider"]): int(row["request_count"])
                 for row in active_connection.execute(
                     "SELECT provider, request_count FROM api_usage WHERE usage_date = ?",
                     (api_usage_date(),),
+                ).fetchall()
+            }
+            monthly_usage = {
+                str(row["provider"]): int(row["request_count"])
+                for row in active_connection.execute(
+                    """
+                    SELECT provider, COALESCE(SUM(request_count), 0) AS request_count
+                    FROM api_usage
+                    WHERE usage_date LIKE ?
+                    GROUP BY provider
+                    """,
+                    (f"{api_usage_month_prefix()}-%",),
                 ).fetchall()
             }
             limits = {
@@ -6270,6 +6574,7 @@ def api_usage_overview(
     with API_USAGE_BUFFER_LOCK:
         for provider, count in API_USAGE_BUFFER.items():
             usage[provider] = usage.get(provider, 0) + count
+            monthly_usage[provider] = monthly_usage.get(provider, 0) + count
 
     overview: list[dict[str, Any]] = []
     for provider, info in API_PROVIDERS.items():
@@ -6278,6 +6583,29 @@ def api_usage_overview(
         configured = api_provider_configured(provider)
         status, status_label = api_usage_status(used, limit, configured)
         percent = min(100, round((used / limit) * 100, 1)) if limit > 0 else 0
+        monthly_used = monthly_usage.get(provider, 0)
+        monthly_limit = max(0, int(info.get("monthlyFreeLimit") or 0))
+        monthly_status, monthly_status_label = api_usage_status(
+            monthly_used,
+            monthly_limit,
+            configured,
+        )
+        severity = {
+            "inactive": 0,
+            "normal": 1,
+            "setup": 2,
+            "warning": 3,
+            "critical": 4,
+            "exhausted": 5,
+        }
+        if monthly_limit > 0 and severity.get(monthly_status, 0) > severity.get(status, 0):
+            status = monthly_status
+            status_label = f"本月{monthly_status_label}"
+        monthly_percent = (
+            min(100, round((monthly_used / monthly_limit) * 100, 1))
+            if monthly_limit > 0
+            else 0
+        )
         overview.append(
             {
                 "provider": provider,
@@ -6291,6 +6619,15 @@ def api_usage_overview(
                 "status": status,
                 "statusLabel": status_label,
                 "periodLabel": "今日",
+                "monthlyUsed": monthly_used,
+                "monthlyLimit": monthly_limit,
+                "monthlyRemaining": (
+                    max(0, monthly_limit - monthly_used)
+                    if monthly_limit > 0
+                    else None
+                ),
+                "monthlyPercent": monthly_percent,
+                "hardFreeLimit": monthly_limit > 0,
             }
         )
     return overview
@@ -6366,14 +6703,16 @@ def parse_360_environmental_results(page: str) -> list[dict[str, str]]:
 def search_public_web(
     query: str,
     top_k: int = 12,
+    *,
+    allow_brave: bool = False,
 ) -> tuple[list[dict[str, str]], str]:
-    """Search through Qianfan first, with the public index parser as fallback."""
+    """Search Qianfan first, optionally using Brave only for URL discovery."""
     normalized_query = truncate_baidu_search_query(query)
     if not normalized_query:
         return [], ""
     manual_url = "https://www.baidu.com/s?" + urlencode({"wd": normalized_query})
     api_key = baidu_search_api_key()
-    qianfan_error: Exception | None = None
+    provider_errors: list[str] = []
     if api_key:
         cache_key = web_search_cache_key(normalized_query, top_k)
         cached = cached_web_search(cache_key)
@@ -6388,8 +6727,19 @@ def search_public_web(
                 if results:
                     return results, manual_url
             except Exception as exc:  # noqa: BLE001 - retain public fallback.
-                qianfan_error = exc
+                provider_errors.append(str(exc))
                 print(f"WARNING: {exc}; falling back to public index.", flush=True)
+
+    brave_key = brave_search_api_key()
+    if allow_brave and brave_key:
+        try:
+            reserve_brave_search_request()
+            brave_results = brave_web_search(brave_key, query, top_k)
+            if brave_results:
+                return brave_results, manual_url
+        except Exception as exc:  # noqa: BLE001 - retain public fallback.
+            provider_errors.append(str(exc))
+            print(f"WARNING: {exc}; falling back to public index.", flush=True)
 
     fallback_url = "https://www.so.com/s?" + urlencode({"q": normalized_query})
     try:
@@ -6398,11 +6748,164 @@ def search_public_web(
             fallback_url,
         )
     except Exception as fallback_error:
-        if qianfan_error:
+        if provider_errors:
             raise RuntimeError(
-                f"{qianfan_error}；公开索引回退失败：{fallback_error}"
+                f"{'；'.join(provider_errors)}；公开索引回退失败：{fallback_error}"
             ) from fallback_error
         raise
+
+
+def hunter_contact_enrichment(
+    company: str,
+    company_website: str = "",
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    api_key = hunter_api_key()
+    if not api_key:
+        return []
+    domain = website_domain(company_website)
+    lookup_value = domain or re.sub(r"\s+", " ", company or "").strip()
+    if not lookup_value:
+        return []
+    cache_query = json.dumps(
+        {"company": company if not domain else "", "domain": domain},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cache_key = web_search_cache_key(
+        cache_query,
+        limit,
+        provider="hunter_domain_search",
+    )
+    cached = cached_web_search(cache_key)
+    if cached is not None:
+        return cached
+    reserve_hunter_request()
+    contacts = hunter_domain_search(
+        api_key,
+        company=company,
+        domain=domain,
+        limit=limit,
+    )
+    store_web_search_cache(
+        cache_key,
+        lookup_value,
+        contacts,
+        provider="hunter_domain_search",
+        cache_days=HUNTER_CACHE_DAYS,
+    )
+    return contacts
+
+
+def enrich_leads_with_hunter(
+    leads: list[Lead],
+    collection_strategy: str,
+) -> tuple[dict[str, Any], list[str]]:
+    summary = {
+        "configured": bool(hunter_api_key()),
+        "checked": 0,
+        "enriched": 0,
+        "emailCount": 0,
+        "perRunLimit": {"precision": 2, "balanced": 3, "coverage": 5}.get(
+            collection_strategy,
+            3,
+        ),
+    }
+    if not summary["configured"] or not leads:
+        return summary, []
+
+    candidates = [
+        lead
+        for lead in sorted(leads, key=lambda item: item.score, reverse=True)
+        if not lead.email
+        and len(normalized_company_name(lead.company)) >= 4
+        and not any(marker in lead.company for marker in ["待核验", "搜索任务", "待识别"])
+        and (
+            lead.direction != "procurement"
+            or procurement_company_is_specific(lead.company)
+        )
+    ][: int(summary["perRunLimit"])]
+    errors: list[str] = []
+    if not candidates:
+        return summary, errors
+
+    with ThreadPoolExecutor(max_workers=min(3, len(candidates))) as executor:
+        futures = {
+            executor.submit(
+                hunter_contact_enrichment,
+                lead.company,
+                lead.company_website,
+                5,
+            )
+            : lead
+            for lead in candidates
+        }
+        for future in as_completed(futures):
+            lead = futures[future]
+            try:
+                contacts = future.result()
+                summary["checked"] += 1
+            except Exception as exc:  # noqa: BLE001 - enrichment must not discard leads.
+                message = str(exc)
+                error = (
+                    f"Hunter 联系方式补全：{message}"
+                    if "保护上限" in message
+                    else f"Hunter 联系方式补全/{lead.company}：{message}"
+                )
+                if error not in errors:
+                    errors.append(error)
+                continue
+            if not contacts:
+                continue
+
+            emails = [str(contact.get("email") or "") for contact in contacts]
+            names = [str(contact.get("name") or "") for contact in contacts]
+            source_urls = list(
+                dict.fromkeys(
+                    str(source_url)
+                    for contact in contacts
+                    for source_url in (contact.get("sourceUrls") or [])
+                    if str(source_url).startswith(("http://", "https://"))
+                )
+            )
+            domain = next(
+                (
+                    str(contact.get("domain") or "").strip()
+                    for contact in contacts
+                    if str(contact.get("domain") or "").strip()
+                ),
+                "",
+            )
+            lead.email = merge_contact_values(lead.email, "；".join(emails), 5)
+            lead.contact_name = merge_contact_values(
+                lead.contact_name,
+                "；".join(name for name in names if name),
+                5,
+            )
+            lead.source = merge_contact_values(lead.source, "Hunter 公开企业邮箱")
+            if domain and not lead.company_website:
+                lead.company_website = f"https://{domain}/"
+            if "Hunter已补全公开企业邮箱" not in lead.match_reason:
+                lead.match_reason = (
+                    f"{lead.match_reason}；Hunter已补全公开企业邮箱"
+                    if lead.match_reason
+                    else "Hunter已补全公开企业邮箱"
+                )
+            if source_urls:
+                evidence = "、".join(source_urls[:3])
+                lead.process_basis = (
+                    f"{lead.process_basis}；公开邮箱来源：{evidence}"
+                    if lead.process_basis
+                    else f"公开邮箱来源：{evidence}"
+                )
+            lead.confidence = merge_contact_values(
+                lead.confidence,
+                "Hunter 公开来源邮箱",
+                6,
+            )
+            summary["enriched"] += 1
+            summary["emailCount"] += len(split_contact_values(lead.email))
+    return summary, errors
 
 
 def extract_competitor_company(value: str) -> str:
@@ -6867,7 +7370,11 @@ def environmental_evidence_excerpt(text: str, signals: list[str], limit: int = 2
 
 
 def discover_company_website(company: str) -> str:
-    results, _ = search_public_web(f'"{company}" 官网 联系方式', top_k=12)
+    results, _ = search_public_web(
+        f"{company} 官方网站 联系我们",
+        top_k=12,
+        allow_brave=True,
+    )
     company_key = re.sub(
         r"(股份有限公司|有限责任公司|集团有限公司|有限公司)$",
         "",
@@ -6904,6 +7411,13 @@ def discover_company_website(company: str) -> str:
         "1688.com",
         "huangye88.com",
         "11467.com",
+        "chinapp.com",
+        "chinabgao.com",
+        "7icp.com",
+        "qichaxun.com",
+        "16ds.com",
+        "lookchem.cn",
+        "chinacem.net",
         "cbi360.net",
         "chemnet.com",
         "made-in-china.com",
@@ -6920,12 +7434,22 @@ def discover_company_website(company: str) -> str:
         if (
             not host
             or host.endswith(".gov.cn")
+            or host.endswith(".edu.cn")
             or any(excluded in host for excluded in excluded_hosts)
         ):
             continue
         evidence_text = f"{result['title']} {result['description']}"
         if not any(signal in evidence_text for signal in company_signals):
             continue
+        if result.get("provider") == "Brave Search 官网发现":
+            try:
+                original_text = visible_html_text(
+                    fetch_html(result["url"], timeout=12)
+                )
+            except Exception:  # noqa: BLE001 - skip unverified API-only candidates.
+                continue
+            if not any(signal in original_text for signal in company_signals):
+                continue
         return f"{parsed.scheme or 'https'}://{parsed.netloc}/"
     return ""
 
@@ -8691,6 +9215,11 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                         f"{existing.match_reason}；官网补充：{lead.match_reason}"
                     )
         leads = sorted(company_deduped.values(), key=lambda item: item.score, reverse=True)
+        contact_enrichment, contact_errors = enrich_leads_with_hunter(
+            leads,
+            collection_strategy,
+        )
+        errors.extend(contact_errors)
         prepared_leads = prepare_lead_results(leads)
         return {
             "leads": prepared_leads,
@@ -8698,7 +9227,9 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "meta": {
                 "count": len(leads),
                 "companyCount": len(leads),
-                "phoneCount": 0,
+                "phoneCount": len([lead for lead in leads if lead.phone]),
+                "contactCount": len([lead for lead in leads if lead.phone or lead.email]),
+                "contactEnrichment": contact_enrichment,
                 "permitCount": len([lead for lead in leads if lead.poi_id]),
                 "requestCount": request_count,
                 "workers": 4,
@@ -8848,6 +9379,11 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "所选时间、地区和关键词下暂未发现可确认采购单位的公告。"
                 "搜索入口仅作为辅助，不再保存为公司线索。"
             )
+        contact_enrichment, contact_errors = enrich_leads_with_hunter(
+            leads,
+            collection_strategy,
+        )
+        errors.extend(contact_errors)
         prepared_leads = prepare_lead_results(leads)
         return {
             "leads": prepared_leads,
@@ -8857,6 +9393,8 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
                 "companyCount": specific_company_count,
                 "announcementCount": announcement_count,
                 "phoneCount": len([lead for lead in leads if lead.phone]),
+                "contactCount": len([lead for lead in leads if lead.phone or lead.email]),
+                "contactEnrichment": contact_enrichment,
                 "requestCount": request_count,
                 "workers": 4,
                 "fastMode": True,
@@ -9042,6 +9580,11 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             leads = fallback_leads(regions, sectors, custom_keywords, direction)
             used_fallback = True
 
+    contact_enrichment, contact_errors = enrich_leads_with_hunter(
+        leads if not used_fallback else [],
+        collection_strategy,
+    )
+    errors.extend(contact_errors)
     leads = sorted(leads, key=lambda item: item.score, reverse=True)
     prepared_leads = prepare_lead_results(leads)
     request_count = len(regions) * sum(
@@ -9057,6 +9600,7 @@ def collect_leads(payload: dict[str, Any], progress_callback: Any = None) -> dic
             "companyCount": 0 if used_fallback else len(leads),
             "phoneCount": len([lead for lead in leads if lead.phone]),
             "contactCount": len([lead for lead in leads if lead.phone or lead.email]),
+            "contactEnrichment": contact_enrichment,
             "requestCount": request_count,
             "workers": max(AMAP_WORKERS, BAIDU_MAP_WORKERS, TIANDITU_WORKERS),
             "fastMode": fast_mode,
@@ -9746,6 +10290,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "hasEnvBaiduMapAk": bool(os.getenv("BAIDU_MAP_AK")),
                     "hasEnvTiandituTk": bool(os.getenv("TIANDITU_TK")),
                     "hasEnvBaiduSearchApiKey": bool(baidu_search_api_key()),
+                    "hasEnvBraveSearchApiKey": bool(brave_search_api_key()),
+                    "hasEnvHunterApiKey": bool(hunter_api_key()),
                     "tursoConfigured": turso_active(),
                     "tursoEnvConfigured": turso_configured(),
                     "tursoError": TURSO_RUNTIME_ERROR,
@@ -10301,6 +10847,10 @@ def main() -> None:
             "WARNING: BAIDU_SEARCH_API_KEY is not set. "
             "Public web discovery will use the compatibility fallback."
         )
+    if not brave_search_api_key():
+        print("WARNING: BRAVE_SEARCH_API_KEY is not set. Official-site discovery has no Brave fallback.")
+    if not hunter_api_key():
+        print("WARNING: HUNTER_API_KEY is not set. Public business-email enrichment is disabled.")
     if (
         not os.getenv("AMAP_KEY")
         and not os.getenv("BAIDU_MAP_AK")

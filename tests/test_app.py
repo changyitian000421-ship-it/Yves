@@ -363,6 +363,8 @@ class LiquidCalciumAppTests(unittest.TestCase):
                 "BAIDU_MAP_AK": "private-baidu-key",
                 "TIANDITU_TK": "private-tianditu-key",
                 "BAIDU_SEARCH_API_KEY": "private-search-key",
+                "BRAVE_SEARCH_API_KEY": "private-brave-key",
+                "HUNTER_API_KEY": "private-hunter-key",
             },
             clear=False,
         ):
@@ -373,10 +375,14 @@ class LiquidCalciumAppTests(unittest.TestCase):
         self.assertTrue(status["mapProviders"]["baidu"])
         self.assertTrue(status["mapProviders"]["tianditu"])
         self.assertTrue(status["webSearchProviders"]["baiduQianfan"])
+        self.assertTrue(status["webSearchProviders"]["braveSearch"])
+        self.assertTrue(status["contactProviders"]["hunter"])
         self.assertNotIn("private-amap-key", str(status))
         self.assertNotIn("private-baidu-key", str(status))
         self.assertNotIn("private-tianditu-key", str(status))
         self.assertNotIn("private-search-key", str(status))
+        self.assertNotIn("private-brave-key", str(status))
+        self.assertNotIn("private-hunter-key", str(status))
 
     def test_api_usage_quota_warns_and_enforces_qianfan_limit(self):
         with patch.dict(
@@ -411,6 +417,8 @@ class LiquidCalciumAppTests(unittest.TestCase):
 
         self.assertEqual(usage["baidu_map"]["used"], 3)
         self.assertIn("baidu_qianfan", usage)
+        self.assertIn("brave_search", usage)
+        self.assertIn("hunter", usage)
         self.assertIn("amap", usage)
         self.assertIn("tianditu", usage)
         self.assertIn("aliyun_sms", usage)
@@ -427,6 +435,28 @@ class LiquidCalciumAppTests(unittest.TestCase):
     def test_api_quota_rejects_unknown_platform(self):
         with self.assertRaisesRegex(ValueError, "未知 API 平台"):
             app.set_api_quota_limits({"unknown_service": 100})
+
+    def test_hunter_monthly_free_guard_cannot_be_overridden_by_daily_limit(self):
+        with patch.dict(os.environ, {"HUNTER_API_KEY": "private-hunter-key"}, clear=False):
+            app.set_api_quota_limits({"hunter": 100})
+            app.reserve_api_request("hunter", enforce_limit=True, count=50)
+            usage = {
+                item["provider"]: item
+                for item in app.api_usage_overview()
+            }["hunter"]
+
+            self.assertEqual(usage["monthlyUsed"], 50)
+            self.assertEqual(usage["monthlyLimit"], 50)
+            self.assertEqual(usage["status"], "exhausted")
+            with self.assertRaisesRegex(RuntimeError, "本月免费保护上限 50 次"):
+                app.reserve_api_request("hunter", enforce_limit=True)
+
+    def test_brave_monthly_free_guard_stops_request_1001(self):
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "private-brave-key"}, clear=False):
+            app.set_api_quota_limits({"brave_search": 2_000})
+            app.reserve_api_request("brave_search", enforce_limit=True, count=1_000)
+            with self.assertRaisesRegex(RuntimeError, "本月免费保护上限 1000 次"):
+                app.reserve_api_request("brave_search", enforce_limit=True)
 
     @patch("app.urlopen")
     def test_qianfan_web_search_uses_bearer_auth_and_maps_references(self, urlopen):
@@ -519,6 +549,71 @@ class LiquidCalciumAppTests(unittest.TestCase):
             ["douyin.com"],
         )
 
+    @patch("app.urlopen")
+    def test_brave_web_search_uses_header_auth_and_maps_web_results(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "测试环保科技有限公司官网",
+                            "url": "https://example.com/about",
+                            "description": "公司从事工业废水处理。",
+                            "page_age": "2026-08-01",
+                        }
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        results = app.brave_web_search(
+            "private-brave-key",
+            "山东 工业废水处理 企业 官网",
+            8,
+        )
+
+        request = urlopen.call_args.args[0]
+        query = parse_qs(urlparse(request.full_url).query)
+        self.assertEqual(urlparse(request.full_url).path, "/res/v1/web/search")
+        self.assertEqual(request.get_header("X-subscription-token"), "private-brave-key")
+        self.assertEqual(query["count"], ["8"])
+        self.assertEqual(results[0]["provider"], "Brave Search 官网发现")
+        self.assertNotIn("private-brave-key", request.full_url)
+
+    @patch("app.brave_web_search")
+    @patch("app.brave_search_api_key", return_value="private-brave-key")
+    @patch("app.baidu_search_api_key", return_value="")
+    def test_brave_url_discovery_is_not_cached(
+        self,
+        _baidu_key,
+        _brave_key,
+        brave_search,
+    ):
+        brave_search.return_value = [
+            {
+                "title": "测试企业官网",
+                "url": "https://example.com/",
+                "description": "测试企业联系方式",
+                "date": "",
+                "website": "",
+                "provider": "Brave Search 官网发现",
+            }
+        ]
+
+        first, _ = app.search_public_web("测试企业 官网", 10, allow_brave=True)
+        second, _ = app.search_public_web("测试企业 官网", 10, allow_brave=True)
+
+        self.assertEqual(first, second)
+        self.assertEqual(brave_search.call_count, 2)
+        with app.database_connection() as connection:
+            cached_count = connection.execute(
+                "SELECT COUNT(*) FROM web_search_cache WHERE provider = 'brave_search'"
+            ).fetchone()[0]
+        self.assertEqual(cached_count, 0)
+
     @patch("app.qianfan_web_search")
     def test_public_web_search_caches_qianfan_results(self, qianfan_search):
         qianfan_search.return_value = [
@@ -596,6 +691,139 @@ class LiquidCalciumAppTests(unittest.TestCase):
         website = app.discover_company_website("山东东岳化工有限公司")
 
         self.assertEqual(website, "https://www.dongyuechem.com/")
+
+    @patch("app.fetch_html", return_value="<html>山东东岳化工有限公司 联系我们</html>")
+    @patch("app.search_public_web")
+    def test_brave_company_website_is_verified_against_original_page(
+        self,
+        public_search,
+        fetch_html,
+    ):
+        public_search.return_value = (
+            [
+                {
+                    "title": "山东东岳化工有限公司",
+                    "description": "企业官网",
+                    "url": "https://www.dongyuechem.com/about/",
+                    "provider": "Brave Search 官网发现",
+                }
+            ],
+            "https://www.baidu.com/s?wd=test",
+        )
+
+        website = app.discover_company_website("山东东岳化工有限公司")
+
+        self.assertEqual(website, "https://www.dongyuechem.com/")
+        fetch_html.assert_called_once_with(
+            "https://www.dongyuechem.com/about/",
+            timeout=12,
+        )
+        self.assertTrue(public_search.call_args.kwargs["allow_brave"])
+
+    @patch("app.fetch_html", return_value="<html>山东东岳化工有限公司 联系我们</html>")
+    @patch("app.search_public_web")
+    def test_brave_company_website_rejects_directory_that_mentions_company(
+        self,
+        public_search,
+        fetch_html,
+    ):
+        public_search.return_value = (
+            [
+                {
+                    "title": "山东东岳化工有限公司企业信息",
+                    "description": "电话、地址和品牌资料",
+                    "url": "https://www.chinapp.com/company/example",
+                    "provider": "Brave Search 官网发现",
+                },
+                {
+                    "title": "东岳氟硅科技集团有限公司",
+                    "description": "公司简介和联系我们",
+                    "url": "https://www.dongyuechem.com/",
+                    "provider": "Brave Search 官网发现",
+                },
+            ],
+            "https://www.baidu.com/s?wd=test",
+        )
+
+        website = app.discover_company_website("山东东岳化工有限公司")
+
+        self.assertEqual(website, "https://www.dongyuechem.com/")
+        fetch_html.assert_called_once_with("https://www.dongyuechem.com/", timeout=12)
+
+    @patch("app.urlopen")
+    def test_hunter_domain_search_keeps_only_publicly_sourced_emails(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "data": {
+                    "domain": "example.com",
+                    "organization": "Example Company",
+                    "emails": [
+                        {
+                            "value": "sales@example.com",
+                            "type": "generic",
+                            "confidence": 96,
+                            "sources": [{"uri": "https://example.com/contact"}],
+                        },
+                        {
+                            "value": "private@example.com",
+                            "type": "personal",
+                            "confidence": 80,
+                            "sources": [],
+                        },
+                    ],
+                }
+            }
+        ).encode("utf-8")
+        urlopen.return_value.__enter__.return_value = response
+
+        contacts = app.hunter_domain_search(
+            "private-hunter-key",
+            domain="https://www.example.com/about",
+            limit=5,
+        )
+
+        request = urlopen.call_args.args[0]
+        query = parse_qs(urlparse(request.full_url).query)
+        self.assertEqual(request.get_header("X-api-key"), "private-hunter-key")
+        self.assertEqual(query["domain"], ["example.com"])
+        self.assertNotIn("api_key", query)
+        self.assertEqual([item["email"] for item in contacts], ["sales@example.com"])
+        self.assertEqual(contacts[0]["sourceUrls"], ["https://example.com/contact"])
+
+    @patch("app.hunter_domain_search")
+    def test_hunter_enrichment_is_cached_and_updates_lead(self, hunter_search):
+        hunter_search.return_value = [
+            {
+                "email": "sales@example.com",
+                "type": "generic",
+                "confidence": 96,
+                "name": "",
+                "position": "",
+                "domain": "example.com",
+                "organization": "测试环保科技有限公司",
+                "sourceUrls": ["https://example.com/contact"],
+            }
+        ]
+        lead = app.Lead(
+            company="测试环保科技有限公司",
+            region="山东",
+            sector="水处理",
+            source="高德 POI",
+            score=80,
+        )
+        with patch.dict(os.environ, {"HUNTER_API_KEY": "private-hunter-key"}, clear=False):
+            first = app.hunter_contact_enrichment(lead.company)
+            second = app.hunter_contact_enrichment(lead.company)
+            summary, errors = app.enrich_leads_with_hunter([lead], "balanced")
+
+        self.assertEqual(first, second)
+        self.assertEqual(hunter_search.call_count, 1)
+        self.assertEqual(errors, [])
+        self.assertEqual(summary["enriched"], 1)
+        self.assertEqual(lead.email, "sales@example.com")
+        self.assertEqual(lead.company_website, "https://example.com/")
+        self.assertIn("Hunter 公开企业邮箱", lead.source)
 
     @patch("app.urlopen")
     def test_tianditu_search_uses_admin_region_and_zero_based_start(self, urlopen):

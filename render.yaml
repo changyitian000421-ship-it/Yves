@@ -17,6 +17,10 @@ services:
         sync: false
       - key: BAIDU_SEARCH_API_KEY
         sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: HUNTER_API_KEY
+        sync: false
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
@@ -39,3 +43,9 @@ services:
         value: "45"
       - key: BAIDU_SEARCH_CACHE_DAYS
         value: "7"
+      - key: BRAVE_SEARCH_DAILY_LIMIT
+        value: "30"
+      - key: HUNTER_DAILY_LIMIT
+        value: "5"
+      - key: HUNTER_CACHE_DAYS
+        value: "30"
